@@ -2,3 +2,5 @@
 logs
 tmp
 .cache
+.env
+.sqlx
