@@ -64,6 +64,18 @@ pub async fn list_markets(
     ctx: Context<'_>,
     #[description = "open, settled, resolved, cancelled, all"] status: Option<String>,
 ) -> Result<(), AppError> {
+    send_markets_list(ctx, status).await
+}
+
+#[poise::command(slash_command)]
+pub async fn markets(
+    ctx: Context<'_>,
+    #[description = "open, settled, resolved, cancelled, all"] status: Option<String>,
+) -> Result<(), AppError> {
+    send_markets_list(ctx, status).await
+}
+
+async fn send_markets_list(ctx: Context<'_>, status: Option<String>) -> Result<(), AppError> {
     let markets = ctx.data().services.markets.list_markets(status).await?;
     if markets.is_empty() {
         ui::send_embed(

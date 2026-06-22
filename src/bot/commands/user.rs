@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use poise::serenity_prelude as serenity;
 
 use crate::bot::ui;
 use crate::bot::{Context, display_name};
@@ -17,13 +18,17 @@ pub async fn ping(ctx: Context<'_>) -> Result<(), AppError> {
 }
 
 #[poise::command(slash_command)]
-pub async fn balance(ctx: Context<'_>) -> Result<(), AppError> {
-    let name = display_name(ctx.author());
+pub async fn balance(
+    ctx: Context<'_>,
+    #[description = "Optional user to inspect"] user: Option<serenity::User>,
+) -> Result<(), AppError> {
+    let target = user.as_ref().unwrap_or_else(|| ctx.author());
+    let name = display_name(target);
     let summary = ctx
         .data()
         .services
         .users
-        .balance(&ctx.author().id.to_string(), &name)
+        .balance(&target.id.to_string(), &name)
         .await?;
     let cooldown = format_claim_time(summary.next_claim_at);
     ui::send_embed(

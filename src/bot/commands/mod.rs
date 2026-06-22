@@ -11,6 +11,7 @@ pub fn all() -> Vec<poise::Command<crate::bot::Data, AppError>> {
         user::balance(),
         user::claim(),
         market::create_market(),
+        market::markets(),
         market::list_markets(),
         market::market(),
         market::resolve_market(),
