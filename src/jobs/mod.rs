@@ -15,6 +15,7 @@ pub fn spawn_background_jobs(
 ) {
     let poll_every = Duration::from_secs(config.manifold_poll_interval_seconds.max(30) as u64);
     let poll_services = services.clone();
+    let poll_config = config.clone();
     tokio::spawn(async move {
         info!(
             poll_seconds = poll_every.as_secs(),
@@ -26,7 +27,8 @@ pub fn spawn_background_jobs(
 
         loop {
             interval.tick().await;
-            if let Err(error) = poll_and_announce(&poll_services, &http).await {
+            if let Err(error) = poll_and_announce(poll_config.as_ref(), &poll_services, &http).await
+            {
                 error!(%error, "manifold resolution poller failed");
             }
         }
@@ -57,10 +59,37 @@ pub fn spawn_background_jobs(
             }
         }
     });
+
+    let loan_every = Duration::from_secs(config.share_offer_cleanup_interval_seconds.max(10) as u64);
+    let loan_services = services.clone();
+    tokio::spawn(async move {
+        info!(
+            cleanup_seconds = loan_every.as_secs(),
+            "starting loan maintenance worker"
+        );
+
+        let mut interval = tokio::time::interval(loan_every);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        loop {
+            interval.tick().await;
+            match loan_services.social.expire_pending_loans().await {
+                Ok(expired) if expired > 0 => info!(expired, "expired pending loans"),
+                Ok(_) => {}
+                Err(error) => error!(%error, "loan expiry worker failed"),
+            }
+            match loan_services.social.mark_overdue_loans().await {
+                Ok(defaulted) if defaulted > 0 => info!(defaulted, "marked overdue loans as defaulted"),
+                Ok(_) => {}
+                Err(error) => error!(%error, "loan default worker failed"),
+            }
+        }
+    });
 }
 
-#[instrument(skip(services, http))]
+#[instrument(skip(config, services, http))]
 async fn poll_and_announce(
+    config: &AppConfig,
     services: &Services,
     http: &Arc<serenity::Http>,
 ) -> Result<(), crate::error::AppError> {
@@ -83,7 +112,7 @@ async fn poll_and_announce(
         if announcement.total_payout > 0 {
             description.push_str(&format!(
                 "\n**Total payout:** {}",
-                ui::money(announcement.total_payout)
+                ui::money(config, announcement.total_payout)
             ));
         }
         if let Some(source) = announcement.external_url.as_ref() {

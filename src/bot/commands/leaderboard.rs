@@ -4,7 +4,15 @@ use crate::error::AppError;
 
 #[poise::command(slash_command)]
 pub async fn leaderboard(ctx: Context<'_>) -> Result<(), AppError> {
-    let entries = ctx.data().services.leaderboards.top_balances(10).await?;
+    let guild_id = ctx.guild_id().ok_or_else(|| {
+        AppError::Validation("leaderboards only exist inside a server economy".to_string())
+    })?;
+    let entries = ctx
+        .data()
+        .services
+        .leaderboards
+        .top_balances(&guild_id.to_string(), 10)
+        .await?;
     if entries.is_empty() {
         ui::send_embed(
             ctx,
@@ -35,7 +43,7 @@ pub async fn leaderboard(ctx: Context<'_>) -> Result<(), AppError> {
                 medal,
                 index + 1,
                 name,
-                ui::money(entry.balance_mana)
+                ui::money(ctx.data().config.as_ref(), entry.balance_mana)
             )
         })
         .collect::<Vec<_>>()

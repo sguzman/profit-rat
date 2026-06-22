@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use poise::serenity_prelude as serenity;
 
 use crate::bot::Context;
+use crate::config::{AppConfig, CurrencyPosition, NegativeStyle};
 use crate::domain::market::{MarketStatus, MarketType};
 use crate::error::AppError;
 use crate::services::market_service::MarketView;
@@ -74,8 +75,59 @@ pub async fn send_market_embed(
     Ok(())
 }
 
-pub fn money(amount: i64) -> String {
-    format!("**{} mana**", amount)
+pub fn money(config: &AppConfig, amount: i64) -> String {
+    format!("**{}**", money_plain(config, amount, true))
+}
+
+pub fn money_plain(config: &AppConfig, amount: i64, embed_context: bool) -> String {
+    let sign = if amount < 0 { -1 } else { 1 };
+    let absolute = amount.abs();
+    let number = format_number(config, absolute, sign < 0);
+
+    let mut pieces = Vec::new();
+    if embed_context && config.currency.use_emoji_in_embeds && !currency_mark(config).is_empty() {
+        pieces.push(currency_mark(config));
+    } else if !embed_context
+        && config.currency.use_emoji_in_plaintext
+        && !currency_mark(config).is_empty()
+    {
+        pieces.push(currency_mark(config));
+    }
+
+    let label = if absolute == 1 {
+        config.currency.singular.as_str()
+    } else {
+        config.currency.plural.as_str()
+    };
+
+    let textual = if config.currency.show_textual_symbol {
+        config.currency.textual_symbol.as_str()
+    } else {
+        label
+    };
+
+    let suffix = if config.currency.show_code {
+        config.currency.code.as_str()
+    } else {
+        textual
+    };
+
+    let space = if config.currency.space_between { " " } else { "" };
+    let body = match config.currency.position {
+        CurrencyPosition::Prefix if config.currency.show_symbol && !config.currency.symbol.is_empty() => {
+            format!("{}{}{}", config.currency.symbol, space, number)
+        }
+        CurrencyPosition::Suffix if config.currency.show_symbol && !config.currency.symbol.is_empty() => {
+            format!("{}{}{}", number, space, config.currency.symbol)
+        }
+        _ => format!("{}{}{}", number, space, suffix),
+    };
+
+    if pieces.is_empty() {
+        body
+    } else {
+        format!("{} {}", pieces.join(" "), body)
+    }
 }
 
 pub fn shares(amount: f64) -> String {
@@ -139,5 +191,51 @@ pub fn market_color(market_type: MarketType, status: MarketStatus) -> serenity::
         }
         (_, MarketStatus::Cancelled) => serenity::Colour::from_rgb(127, 140, 141),
         (_, MarketStatus::NeedsManualReview) => serenity::Colour::from_rgb(230, 126, 34),
+    }
+}
+
+fn currency_mark(config: &AppConfig) -> String {
+    if !config.currency.custom_emoji.is_empty() {
+        return config.currency.custom_emoji.clone();
+    }
+    config.currency.emoji.clone()
+}
+
+fn format_number(config: &AppConfig, absolute: i64, negative: bool) -> String {
+    let base = if config.currency.short_suffixes {
+        shorten_number(absolute)
+    } else {
+        with_separator(absolute, &config.currency.thousands_separator)
+    };
+
+    if !negative {
+        return base;
+    }
+
+    match config.currency.negative_style {
+        NegativeStyle::Minus => format!("-{base}"),
+        NegativeStyle::Parens => format!("({base})"),
+    }
+}
+
+fn with_separator(value: i64, separator: &str) -> String {
+    let digits = value.to_string();
+    let chars = digits.chars().rev().collect::<Vec<_>>();
+    let mut out = String::new();
+    for (index, ch) in chars.iter().enumerate() {
+        if index > 0 && index % 3 == 0 {
+            out.push_str(separator);
+        }
+        out.push(*ch);
+    }
+    out.chars().rev().collect()
+}
+
+fn shorten_number(value: i64) -> String {
+    match value {
+        0..=999 => value.to_string(),
+        1_000..=999_999 => format!("{:.1}k", value as f64 / 1_000.0),
+        1_000_000..=999_999_999 => format!("{:.1}m", value as f64 / 1_000_000.0),
+        _ => format!("{:.1}b", value as f64 / 1_000_000_000.0),
     }
 }

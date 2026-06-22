@@ -22,6 +22,7 @@ pub struct TradingService {
 
 #[derive(Clone, Debug)]
 pub struct BuyRequest {
+    pub guild_id: String,
     pub user_id: String,
     pub display_name: String,
     pub market_id: i64,
@@ -31,6 +32,7 @@ pub struct BuyRequest {
 
 #[derive(Clone, Debug)]
 pub struct SellRequest {
+    pub guild_id: String,
     pub user_id: String,
     pub display_name: String,
     pub market_id: i64,
@@ -52,6 +54,7 @@ pub struct TradeReceipt {
 
 #[derive(Clone, Debug)]
 pub struct CreateShareOfferRequest {
+    pub guild_id: String,
     pub seller_user_id: String,
     pub seller_display_name: String,
     pub buyer_user_id: String,
@@ -137,9 +140,11 @@ impl TradingService {
 
     #[instrument(skip(self))]
     pub async fn buy(&self, request: BuyRequest) -> AppResult<TradeReceipt> {
-        self.ensure_user(&request.user_id, &request.display_name)
+        self.ensure_account(&request.guild_id, &request.user_id, &request.display_name)
             .await?;
-        let detail = self.load_market(request.market_id).await?;
+        let detail = self
+            .load_market_in_guild(&request.guild_id, request.market_id)
+            .await?;
         if detail.market.status() != MarketStatus::Open {
             return Err(AppError::Conflict(
                 "market is not open for trading".to_string(),
@@ -153,7 +158,7 @@ impl TradingService {
 
         let option_index = find_option_index(&detail.options, &request.option_label)?;
         let option = detail.options[option_index].clone();
-        let balance = self.user_balance(&request.user_id).await?;
+        let balance = self.user_balance(&request.guild_id, &request.user_id).await?;
         if balance < request.amount_mana {
             return Err(AppError::Conflict(
                 "insufficient fake mana balance".to_string(),
@@ -174,9 +179,11 @@ impl TradingService {
 
     #[instrument(skip(self))]
     pub async fn sell(&self, request: SellRequest) -> AppResult<TradeReceipt> {
-        self.ensure_user(&request.user_id, &request.display_name)
+        self.ensure_account(&request.guild_id, &request.user_id, &request.display_name)
             .await?;
-        let detail = self.load_market(request.market_id).await?;
+        let detail = self
+            .load_market_in_guild(&request.guild_id, request.market_id)
+            .await?;
         if detail.market.status() != MarketStatus::Open {
             return Err(AppError::Conflict(
                 "market is not open for selling".to_string(),
@@ -221,9 +228,17 @@ impl TradingService {
         &self,
         request: CreateShareOfferRequest,
     ) -> AppResult<ShareOfferReceipt> {
-        self.ensure_user(&request.seller_user_id, &request.seller_display_name)
+        self.ensure_account(
+            &request.guild_id,
+            &request.seller_user_id,
+            &request.seller_display_name,
+        )
             .await?;
-        self.ensure_user(&request.buyer_user_id, &request.buyer_display_name)
+        self.ensure_account(
+            &request.guild_id,
+            &request.buyer_user_id,
+            &request.buyer_display_name,
+        )
             .await?;
 
         if request.seller_user_id == request.buyer_user_id {
@@ -242,7 +257,9 @@ impl TradingService {
             ));
         }
 
-        let detail = self.load_market(request.market_id).await?;
+        let detail = self
+            .load_market_in_guild(&request.guild_id, request.market_id)
+            .await?;
         if detail.market.status() != MarketStatus::Open {
             return Err(AppError::Conflict(
                 "market is not open for share transfers".to_string(),
@@ -293,6 +310,7 @@ impl TradingService {
     #[instrument(skip(self))]
     pub async fn incoming_share_offers(
         &self,
+        guild_id: &str,
         buyer_user_id: &str,
     ) -> AppResult<Vec<IncomingShareOfferSummary>> {
         self.expire_pending_share_offers().await?;
@@ -311,10 +329,13 @@ impl TradingService {
              FROM share_transfer_offers o
              JOIN markets m ON m.id = o.market_id
              JOIN market_options mo ON mo.id = o.option_id
-             LEFT JOIN users u ON u.discord_user_id = o.seller_discord_user_id
-             WHERE o.buyer_discord_user_id = ?1 AND o.status = 'pending'
+             LEFT JOIN guild_accounts u
+               ON u.guild_id = m.guild_id
+              AND u.discord_user_id = o.seller_discord_user_id
+             WHERE m.guild_id = ?1 AND o.buyer_discord_user_id = ?2 AND o.status = 'pending'
              ORDER BY o.expires_at ASC, o.id ASC",
         )
+        .bind(guild_id)
         .bind(buyer_user_id)
         .fetch_all(&self.pool)
         .await?;
@@ -340,6 +361,7 @@ impl TradingService {
     #[instrument(skip(self))]
     pub async fn autocomplete_incoming_share_offers(
         &self,
+        guild_id: &str,
         buyer_user_id: &str,
         partial: &str,
         limit: i64,
@@ -362,13 +384,17 @@ impl TradingService {
              FROM share_transfer_offers o
              JOIN markets m ON m.id = o.market_id
              JOIN market_options mo ON mo.id = o.option_id
-             LEFT JOIN users u ON u.discord_user_id = o.seller_discord_user_id
-             WHERE o.buyer_discord_user_id = ?1
+             LEFT JOIN guild_accounts u
+               ON u.guild_id = m.guild_id
+              AND u.discord_user_id = o.seller_discord_user_id
+             WHERE m.guild_id = ?1
+               AND o.buyer_discord_user_id = ?2
                AND o.status = 'pending'
-               AND (?2 = '' OR m.question LIKE ?3 OR mo.label LIKE ?3 OR CAST(o.id AS TEXT) LIKE ?3)
+               AND (?3 = '' OR m.question LIKE ?4 OR mo.label LIKE ?4 OR CAST(o.id AS TEXT) LIKE ?4)
              ORDER BY o.expires_at ASC, o.id ASC
-             LIMIT ?4",
+             LIMIT ?5",
         )
+        .bind(guild_id)
         .bind(buyer_user_id)
         .bind(trimmed)
         .bind(like)
@@ -399,11 +425,13 @@ impl TradingService {
     #[instrument(skip(self))]
     pub async fn accept_share_offer(
         &self,
+        guild_id: &str,
         offer_id: i64,
         buyer_user_id: &str,
         buyer_display_name: &str,
     ) -> AppResult<ShareOfferActionReceipt> {
-        self.ensure_user(buyer_user_id, buyer_display_name).await?;
+        self.ensure_account(guild_id, buyer_user_id, buyer_display_name)
+            .await?;
         self.expire_pending_share_offers().await?;
 
         let offer = self.load_pending_offer(offer_id).await?;
@@ -421,7 +449,7 @@ impl TradingService {
             ));
         }
 
-        let detail = self.load_market(offer.market_id).await?;
+        let detail = self.load_market_in_guild(guild_id, offer.market_id).await?;
         if detail.market.status() != MarketStatus::Open {
             return Err(AppError::Conflict(
                 "market is no longer open for share transfers".to_string(),
@@ -441,7 +469,7 @@ impl TradingService {
             ));
         }
 
-        let buyer_balance = self.user_balance(buyer_user_id).await?;
+        let buyer_balance = self.user_balance(guild_id, buyer_user_id).await?;
         if buyer_balance < offer.price_mana {
             return Err(AppError::Conflict(
                 "you do not have enough fake mana to accept that offer".to_string(),
@@ -452,25 +480,31 @@ impl TradingService {
             .current_option_price(offer.market_id, offer.option_id)
             .await?;
         let seller_name = self
-            .user_display_name(&offer.seller_discord_user_id)
+            .user_display_name(guild_id, &offer.seller_discord_user_id)
             .await?;
         let now = now_rfc3339();
 
         let mut tx = self.pool.begin().await?;
         sqlx::query(
-            "UPDATE users SET balance_mana = balance_mana - ?2, updated_at = ?3 WHERE discord_user_id = ?1",
+            "UPDATE guild_accounts
+             SET balance_mana = balance_mana - ?2, updated_at = ?3
+             WHERE guild_id = ?1 AND discord_user_id = ?4",
         )
-        .bind(buyer_user_id)
+        .bind(guild_id)
         .bind(offer.price_mana)
         .bind(&now)
+        .bind(buyer_user_id)
         .execute(&mut *tx)
         .await?;
         sqlx::query(
-            "UPDATE users SET balance_mana = balance_mana + ?2, updated_at = ?3 WHERE discord_user_id = ?1",
+            "UPDATE guild_accounts
+             SET balance_mana = balance_mana + ?2, updated_at = ?3
+             WHERE guild_id = ?1 AND discord_user_id = ?4",
         )
-        .bind(&offer.seller_discord_user_id)
+        .bind(guild_id)
         .bind(offer.price_mana)
         .bind(&now)
+        .bind(&offer.seller_discord_user_id)
         .execute(&mut *tx)
         .await?;
 
@@ -530,18 +564,22 @@ impl TradingService {
         .await?;
         self.insert_balance_event(
             &mut tx,
+            guild_id,
             buyer_user_id,
             -offer.price_mana,
             "peer_offer_purchase",
             offer.market_id,
+            Some(offer.option_id),
         )
         .await?;
         self.insert_balance_event(
             &mut tx,
+            guild_id,
             &offer.seller_discord_user_id,
             offer.price_mana,
             "peer_offer_sale",
             offer.market_id,
+            Some(offer.option_id),
         )
         .await?;
         sqlx::query(
@@ -565,13 +603,14 @@ impl TradingService {
             price_mana: offer.price_mana,
             status: "accepted".to_string(),
             expires_at,
-            buyer_balance_mana: Some(self.user_balance(buyer_user_id).await?),
+            buyer_balance_mana: Some(self.user_balance(guild_id, buyer_user_id).await?),
         })
     }
 
     #[instrument(skip(self))]
     pub async fn decline_share_offer(
         &self,
+        guild_id: &str,
         offer_id: i64,
         buyer_user_id: &str,
     ) -> AppResult<ShareOfferActionReceipt> {
@@ -584,9 +623,9 @@ impl TradingService {
         }
 
         let seller_name = self
-            .user_display_name(&offer.seller_discord_user_id)
+            .user_display_name(guild_id, &offer.seller_discord_user_id)
             .await?;
-        let detail = self.load_market(offer.market_id).await?;
+        let detail = self.load_market_in_guild(guild_id, offer.market_id).await?;
         let option = detail
             .options
             .iter()
@@ -656,10 +695,15 @@ impl TradingService {
         let price_after = probabilities_after[option_index];
 
         let mut tx = self.pool.begin().await?;
-        sqlx::query("UPDATE users SET balance_mana = balance_mana - ?2, updated_at = ?3 WHERE discord_user_id = ?1")
-            .bind(&request.user_id)
+        sqlx::query(
+            "UPDATE guild_accounts
+             SET balance_mana = balance_mana - ?2, updated_at = ?3
+             WHERE guild_id = ?1 AND discord_user_id = ?4",
+        )
+            .bind(&request.guild_id)
             .bind(request.amount_mana)
             .bind(now_rfc3339())
+            .bind(&request.user_id)
             .execute(&mut *tx)
             .await?;
         sqlx::query(
@@ -695,15 +739,17 @@ impl TradingService {
         .await?;
         self.insert_balance_event(
             &mut tx,
+            &request.guild_id,
             &request.user_id,
             -request.amount_mana,
             "buy",
             request.market_id,
+            Some(option.id),
         )
         .await?;
         tx.commit().await?;
 
-        let balance_mana = self.user_balance(&request.user_id).await?;
+        let balance_mana = self.user_balance(&request.guild_id, &request.user_id).await?;
         Ok(TradeReceipt {
             market_id: request.market_id,
             market_type: "native".to_string(),
@@ -737,10 +783,15 @@ impl TradingService {
         let shares_delta = request.amount_mana as f64 / price_before;
 
         let mut tx = self.pool.begin().await?;
-        sqlx::query("UPDATE users SET balance_mana = balance_mana - ?2, updated_at = ?3 WHERE discord_user_id = ?1")
-            .bind(&request.user_id)
+        sqlx::query(
+            "UPDATE guild_accounts
+             SET balance_mana = balance_mana - ?2, updated_at = ?3
+             WHERE guild_id = ?1 AND discord_user_id = ?4",
+        )
+            .bind(&request.guild_id)
             .bind(request.amount_mana)
             .bind(now_rfc3339())
+            .bind(&request.user_id)
             .execute(&mut *tx)
             .await?;
         self.upsert_position(
@@ -769,10 +820,12 @@ impl TradingService {
         .await?;
         self.insert_balance_event(
             &mut tx,
+            &request.guild_id,
             &request.user_id,
             -request.amount_mana,
             "buy",
             request.market_id,
+            Some(option.id),
         )
         .await?;
         tx.commit().await?;
@@ -781,7 +834,7 @@ impl TradingService {
             market_id: request.market_id,
             market_type: "manifold".to_string(),
             option_label: option.label,
-            balance_mana: self.user_balance(&request.user_id).await?,
+            balance_mana: self.user_balance(&request.guild_id, &request.user_id).await?,
             mana_amount: request.amount_mana,
             shares_delta,
             price_before,
@@ -816,10 +869,15 @@ impl TradingService {
         let price_after = probabilities_after[option_index];
 
         let mut tx = self.pool.begin().await?;
-        sqlx::query("UPDATE users SET balance_mana = balance_mana + ?2, updated_at = ?3 WHERE discord_user_id = ?1")
-            .bind(&request.user_id)
+        sqlx::query(
+            "UPDATE guild_accounts
+             SET balance_mana = balance_mana + ?2, updated_at = ?3
+             WHERE guild_id = ?1 AND discord_user_id = ?4",
+        )
+            .bind(&request.guild_id)
             .bind(revenue)
             .bind(now_rfc3339())
+            .bind(&request.user_id)
             .execute(&mut *tx)
             .await?;
         sqlx::query(
@@ -855,10 +913,12 @@ impl TradingService {
         .await?;
         self.insert_balance_event(
             &mut tx,
+            &request.guild_id,
             &request.user_id,
             revenue,
             "sell",
             request.market_id,
+            Some(option.id),
         )
         .await?;
         tx.commit().await?;
@@ -867,7 +927,7 @@ impl TradingService {
             market_id: request.market_id,
             market_type: "native".to_string(),
             option_label: option.label,
-            balance_mana: self.user_balance(&request.user_id).await?,
+            balance_mana: self.user_balance(&request.guild_id, &request.user_id).await?,
             mana_amount: revenue,
             shares_delta: request.shares,
             price_before,
@@ -892,10 +952,15 @@ impl TradingService {
         debug!(market_id = request.market_id, %price, revenue, "selling manifold position");
 
         let mut tx = self.pool.begin().await?;
-        sqlx::query("UPDATE users SET balance_mana = balance_mana + ?2, updated_at = ?3 WHERE discord_user_id = ?1")
-            .bind(&request.user_id)
+        sqlx::query(
+            "UPDATE guild_accounts
+             SET balance_mana = balance_mana + ?2, updated_at = ?3
+             WHERE guild_id = ?1 AND discord_user_id = ?4",
+        )
+            .bind(&request.guild_id)
             .bind(revenue)
             .bind(now_rfc3339())
+            .bind(&request.user_id)
             .execute(&mut *tx)
             .await?;
         self.upsert_position(
@@ -924,10 +989,12 @@ impl TradingService {
         .await?;
         self.insert_balance_event(
             &mut tx,
+            &request.guild_id,
             &request.user_id,
             revenue,
             "sell",
             request.market_id,
+            Some(option.id),
         )
         .await?;
         tx.commit().await?;
@@ -936,7 +1003,7 @@ impl TradingService {
             market_id: request.market_id,
             market_type: "manifold".to_string(),
             option_label: option.label,
-            balance_mana: self.user_balance(&request.user_id).await?,
+            balance_mana: self.user_balance(&request.guild_id, &request.user_id).await?,
             mana_amount: revenue,
             shares_delta: request.shares,
             price_before: price,
@@ -1042,8 +1109,18 @@ impl TradingService {
         }
     }
 
-    async fn ensure_user(&self, user_id: &str, display_name: &str) -> AppResult<()> {
-        let existing = sqlx::query("SELECT discord_user_id FROM users WHERE discord_user_id = ?1")
+    async fn ensure_account(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        display_name: &str,
+    ) -> AppResult<()> {
+        let existing = sqlx::query(
+            "SELECT discord_user_id
+             FROM guild_accounts
+             WHERE guild_id = ?1 AND discord_user_id = ?2",
+        )
+            .bind(guild_id)
             .bind(user_id)
             .fetch_optional(&self.pool)
             .await?;
@@ -1051,31 +1128,39 @@ impl TradingService {
             let now = now_rfc3339();
             let mut tx = self.pool.begin().await?;
             sqlx::query(
-                "INSERT INTO users (discord_user_id, display_name, balance_mana, total_claimed_mana, last_claim_at, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, 0, NULL, ?4, ?4)",
+                "INSERT INTO guild_accounts
+                 (guild_id, discord_user_id, display_name, balance_mana, total_claimed_mana, last_claim_at, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, 0, NULL, ?5, ?5)",
             )
+            .bind(guild_id)
             .bind(user_id)
             .bind(display_name)
             .bind(self.config.starting_balance)
             .bind(&now)
             .execute(&mut *tx)
             .await?;
-            sqlx::query(
-                "INSERT INTO balance_events (discord_user_id, amount_mana, reason, related_market_id, created_at)
-                 VALUES (?1, ?2, 'initial_grant', NULL, ?3)",
+            self.insert_balance_event(
+                &mut tx,
+                guild_id,
+                user_id,
+                self.config.starting_balance,
+                "initial_grant",
+                0,
+                None,
             )
-            .bind(user_id)
-            .bind(self.config.starting_balance)
-            .bind(&now)
-            .execute(&mut *tx)
             .await?;
             tx.commit().await?;
         }
         Ok(())
     }
 
-    async fn user_balance(&self, user_id: &str) -> AppResult<i64> {
-        let row = sqlx::query("SELECT balance_mana FROM users WHERE discord_user_id = ?1")
+    async fn user_balance(&self, guild_id: &str, user_id: &str) -> AppResult<i64> {
+        let row = sqlx::query(
+            "SELECT balance_mana
+             FROM guild_accounts
+             WHERE guild_id = ?1 AND discord_user_id = ?2",
+        )
+            .bind(guild_id)
             .bind(user_id)
             .fetch_one(&self.pool)
             .await?;
@@ -1099,6 +1184,20 @@ impl TradingService {
         .fetch_all(&self.pool)
         .await?;
         Ok(crate::domain::market::MarketDetail { market, options })
+    }
+
+    async fn load_market_in_guild(
+        &self,
+        guild_id: &str,
+        market_id: i64,
+    ) -> AppResult<crate::domain::market::MarketDetail> {
+        let detail = self.load_market(market_id).await?;
+        if detail.market.guild_id != guild_id {
+            return Err(AppError::NotFound(format!(
+                "market {market_id} was not found in this server"
+            )));
+        }
+        Ok(detail)
     }
 
     async fn market_liquidity(&self, market_id: i64) -> AppResult<f64> {
@@ -1190,8 +1289,13 @@ impl TradingService {
         Ok(offer)
     }
 
-    async fn user_display_name(&self, user_id: &str) -> AppResult<String> {
-        let row = sqlx::query("SELECT display_name FROM users WHERE discord_user_id = ?1")
+    async fn user_display_name(&self, guild_id: &str, user_id: &str) -> AppResult<String> {
+        let row = sqlx::query(
+            "SELECT display_name
+             FROM guild_accounts
+             WHERE guild_id = ?1 AND discord_user_id = ?2",
+        )
+            .bind(guild_id)
             .bind(user_id)
             .fetch_optional(&self.pool)
             .await?;
@@ -1268,19 +1372,24 @@ impl TradingService {
     async fn insert_balance_event(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        guild_id: &str,
         user_id: &str,
         amount_mana: i64,
         reason: &str,
         market_id: i64,
+        option_id: Option<i64>,
     ) -> AppResult<()> {
         sqlx::query(
-            "INSERT INTO balance_events (discord_user_id, amount_mana, reason, related_market_id, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO economy_events
+             (guild_id, discord_user_id, related_market_id, related_option_id, asset_type, amount_mana, amount_shares, reason, note, created_at)
+             VALUES (?1, ?2, ?3, ?4, 'money', ?5, NULL, ?6, NULL, ?7)",
         )
+        .bind(guild_id)
         .bind(user_id)
+        .bind(market_id)
+        .bind(option_id)
         .bind(amount_mana)
         .bind(reason)
-        .bind(market_id)
         .bind(now_rfc3339())
         .execute(&mut **tx)
         .await?;

@@ -121,7 +121,9 @@ pub struct PositionRecord {
 
 #[allow(dead_code)]
 #[derive(Clone, Debug, FromRow)]
-pub struct UserRecord {
+pub struct GuildAccountRecord {
+    pub id: i64,
+    pub guild_id: String,
     pub discord_user_id: String,
     pub display_name: Option<String>,
     pub balance_mana: i64,
@@ -131,7 +133,7 @@ pub struct UserRecord {
     pub updated_at: String,
 }
 
-impl UserRecord {
+impl GuildAccountRecord {
     pub fn last_claim_at(&self) -> Option<DateTime<Utc>> {
         self.last_claim_at
             .as_deref()

@@ -52,7 +52,7 @@ pub async fn create_market(
         "📈 Market Opened",
         &view,
         Some(format!(
-            "🎯 Use `/buy market:<pick from dropdown> option:<pick from dropdown> amount:<mana>` to make your first move. Market ID: **#{}**.",
+            "🎯 Use `/buy market:<pick from dropdown> option:<pick from dropdown> amount:<budget>` to make the first move. Market ID: **#{}**.",
             view.detail.market.id
         )),
     )
@@ -77,7 +77,15 @@ pub async fn markets(
 }
 
 async fn send_markets_list(ctx: Context<'_>, status: Option<String>) -> Result<(), AppError> {
-    let markets = ctx.data().services.markets.list_markets(status).await?;
+    let guild_id = ctx.guild_id().ok_or_else(|| {
+        AppError::Validation("market lists only exist inside a server".to_string())
+    })?;
+    let markets = ctx
+        .data()
+        .services
+        .markets
+        .list_markets(&guild_id.to_string(), status)
+        .await?;
     if markets.is_empty() {
         ui::send_embed(
             ctx,
@@ -93,7 +101,7 @@ async fn send_markets_list(ctx: Context<'_>, status: Option<String>) -> Result<(
         .into_iter()
         .map(|market| {
             format!(
-                "• **#{}**  {}  {}\n  **{}**",
+                "• **#{}** {} {}\n**{}**",
                 market.id,
                 if market.market_type == "manifold" {
                     "🛰️"
@@ -129,8 +137,16 @@ pub async fn market(
     #[autocomplete = "autocomplete_any_market"]
     market: String,
 ) -> Result<(), AppError> {
+    let guild_id = ctx.guild_id().ok_or_else(|| {
+        AppError::Validation("markets can only be viewed inside a server".to_string())
+    })?;
     let market_id = parse_market_id(&market)?;
-    let view = ctx.data().services.markets.market_view(market_id).await?;
+    let view = ctx
+        .data()
+        .services
+        .markets
+        .market_view_for_guild(&guild_id.to_string(), market_id)
+        .await?;
     ui::send_market_embed(ctx, "🔎 Market View", &view, None).await?;
     Ok(())
 }
@@ -142,17 +158,20 @@ pub async fn market_holders(
     #[autocomplete = "autocomplete_any_market"]
     market: String,
 ) -> Result<(), AppError> {
+    let guild_id = ctx.guild_id().ok_or_else(|| {
+        AppError::Validation("market holder lists only exist inside a server".to_string())
+    })?;
     let market_id = parse_market_id(&market)?;
     let (view, holders) = ctx
         .data()
         .services
         .markets
-        .market_holders(market_id)
+        .market_holders(&guild_id.to_string(), market_id)
         .await?;
     if holders.is_empty() {
         ui::send_embed(
             ctx,
-            "ðŸ‘¥ Market Holders",
+            "👥 Market Holders",
             format!(
                 "{} **{}**\nNo one is holding shares in this market yet.",
                 ui::market_id_line(view.detail.market.id),
@@ -167,20 +186,21 @@ pub async fn market_holders(
         return Ok(());
     }
 
+    let config = ctx.data().config.as_ref();
     let body = holders
         .into_iter()
         .map(|holder| {
             format!(
-                "{} **{}**  â€¢  {} **{}**\nHolding {}  â€¢  Value {}  â€¢  P/L {}\nSpent {}  â€¢  Received {}",
+                "{} **{}** • {} **{}**\nHolding {} • Value {} • P/L {}\nSpent {} • Received {}",
                 ui::market_emoji(view.detail.market.market_type()),
                 holder.display_name,
                 ui::option_emoji(&holder.option_label),
                 holder.option_label,
                 ui::shares(holder.shares),
-                ui::money(holder.current_value_mana),
-                ui::money(holder.unrealized_pnl_mana),
-                ui::money(holder.total_spent_mana),
-                ui::money(holder.total_received_mana)
+                ui::money(config, holder.current_value_mana),
+                ui::money(config, holder.unrealized_pnl_mana),
+                ui::money(config, holder.total_spent_mana),
+                ui::money(config, holder.total_received_mana)
             )
         })
         .collect::<Vec<_>>()
@@ -188,7 +208,7 @@ pub async fn market_holders(
 
     ui::send_embed(
         ctx,
-        format!("ðŸ‘¥ Holders {}", ui::market_id_line(view.detail.market.id)),
+        format!("👥 Holders {}", ui::market_id_line(view.detail.market.id)),
         format!("**{}**\n\n{}", view.detail.market.question, body),
         ui::market_color(
             view.detail.market.market_type(),
@@ -209,12 +229,15 @@ pub async fn resolve_market(
     #[autocomplete = "autocomplete_market_option"]
     winning_option: String,
 ) -> Result<(), AppError> {
+    let guild_id = ctx.guild_id().ok_or_else(|| {
+        AppError::Validation("markets can only be resolved inside a server".to_string())
+    })?;
     let market_id = parse_market_id(&market)?;
     let payout = ctx
         .data()
         .services
         .markets
-        .resolve_native_market(market_id, &winning_option)
+        .resolve_native_market(&guild_id.to_string(), market_id, &winning_option)
         .await?;
     ui::send_embed(
         ctx,
@@ -224,7 +247,7 @@ pub async fn resolve_market(
             market_id,
             ui::option_emoji(&winning_option),
             winning_option,
-            ui::money(payout)
+            ui::money(ctx.data().config.as_ref(), payout)
         ),
         poise::serenity_prelude::Colour::from_rgb(52, 152, 219),
     )
@@ -272,8 +295,16 @@ pub async fn manifold_market(
     #[autocomplete = "autocomplete_manifold_market"]
     market: String,
 ) -> Result<(), AppError> {
+    let guild_id = ctx.guild_id().ok_or_else(|| {
+        AppError::Validation("tracked markets can only be viewed inside a server".to_string())
+    })?;
     let market_id = parse_market_id(&market)?;
-    let view = ctx.data().services.markets.market_view(market_id).await?;
+    let view = ctx
+        .data()
+        .services
+        .markets
+        .market_view_for_guild(&guild_id.to_string(), market_id)
+        .await?;
     ui::send_market_embed(ctx, "🛰️ Manifold View", &view, None).await?;
     Ok(())
 }
@@ -285,17 +316,26 @@ pub async fn msync(
     #[autocomplete = "autocomplete_manifold_market"]
     market: String,
 ) -> Result<(), AppError> {
+    let guild_id = ctx.guild_id().ok_or_else(|| {
+        AppError::Validation("tracked markets can only be synced inside a server".to_string())
+    })?;
     let market_id = parse_market_id(&market)?;
     let view = ctx
         .data()
         .services
         .markets
-        .sync_manifold_market(market_id)
+        .market_view_for_guild(&guild_id.to_string(), market_id)
         .await?;
+    if view.detail.market.market_type != "manifold" {
+        return Err(AppError::Validation(
+            "that market is not a Manifold-tracked market".to_string(),
+        ));
+    }
+    let synced = ctx.data().services.markets.sync_manifold_market(market_id).await?;
     ui::send_market_embed(
         ctx,
         "🔄 Manifold Synced",
-        &view,
+        &synced,
         Some("Fresh snapshot pulled from Manifold.".to_string()),
     )
     .await?;
@@ -306,10 +346,14 @@ pub(crate) async fn autocomplete_any_market(
     ctx: Context<'_>,
     partial: &str,
 ) -> Vec<serenity::AutocompleteChoice> {
+    let Some(guild_id) = ctx.guild_id() else {
+        return Vec::new();
+    };
+
     ctx.data()
         .services
         .markets
-        .autocomplete_markets(partial, None, None, 20)
+        .autocomplete_markets(&guild_id.to_string(), partial, None, None, 20)
         .await
         .unwrap_or_default()
 }
@@ -318,10 +362,14 @@ pub(crate) async fn autocomplete_open_market(
     ctx: Context<'_>,
     partial: &str,
 ) -> Vec<serenity::AutocompleteChoice> {
+    let Some(guild_id) = ctx.guild_id() else {
+        return Vec::new();
+    };
+
     ctx.data()
         .services
         .markets
-        .autocomplete_markets(partial, Some("open"), None, 20)
+        .autocomplete_markets(&guild_id.to_string(), partial, Some("open"), None, 20)
         .await
         .unwrap_or_default()
 }
@@ -330,10 +378,20 @@ pub(crate) async fn autocomplete_open_native_market(
     ctx: Context<'_>,
     partial: &str,
 ) -> Vec<serenity::AutocompleteChoice> {
+    let Some(guild_id) = ctx.guild_id() else {
+        return Vec::new();
+    };
+
     ctx.data()
         .services
         .markets
-        .autocomplete_markets(partial, Some("open"), Some("native"), 20)
+        .autocomplete_markets(
+            &guild_id.to_string(),
+            partial,
+            Some("open"),
+            Some("native"),
+            20,
+        )
         .await
         .unwrap_or_default()
 }
@@ -342,10 +400,14 @@ pub(crate) async fn autocomplete_manifold_market(
     ctx: Context<'_>,
     partial: &str,
 ) -> Vec<serenity::AutocompleteChoice> {
+    let Some(guild_id) = ctx.guild_id() else {
+        return Vec::new();
+    };
+
     ctx.data()
         .services
         .markets
-        .autocomplete_markets(partial, None, Some("manifold"), 20)
+        .autocomplete_markets(&guild_id.to_string(), partial, None, Some("manifold"), 20)
         .await
         .unwrap_or_default()
 }

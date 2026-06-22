@@ -1,5 +1,6 @@
 mod leaderboard;
 mod market;
+mod social;
 mod trading;
 mod user;
 
@@ -27,6 +28,15 @@ pub fn all() -> Vec<poise::Command<crate::bot::Data, AppError>> {
         trading::decline_share_offer(),
         trading::positions(),
         trading::mpositions(),
+        social::donate_money(),
+        social::donate_shares(),
+        social::offer_loan_money(),
+        social::offer_loan_shares(),
+        social::incoming_loans(),
+        social::accept_loan(),
+        social::decline_loan(),
+        social::loan_status(),
+        social::repay_loan(),
         leaderboard::leaderboard(),
     ]
 }

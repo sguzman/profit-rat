@@ -124,21 +124,33 @@ impl MarketService {
         self.market_view(market_id).await
     }
 
-    #[instrument(skip(self))]
-    pub async fn list_markets(&self, status: Option<String>) -> AppResult<Vec<ListMarketsItem>> {
+    #[instrument(skip(self), fields(guild_id))]
+    pub async fn list_markets(
+        &self,
+        guild_id: &str,
+        status: Option<String>,
+    ) -> AppResult<Vec<ListMarketsItem>> {
         let status = status.unwrap_or_else(|| "open".to_string());
         let items = if status == "all" {
             sqlx::query_as::<_, MarketRecord>(
                 "SELECT id, guild_id, channel_id, creator_discord_user_id, question, status, market_type, liquidity_b, close_time, resolved_option_id, created_at, resolved_at, updated_at, external_source, external_id, external_url, external_slug, last_external_sync_at, external_status, external_resolution
-                 FROM markets ORDER BY id DESC LIMIT 25",
+                 FROM markets
+                 WHERE guild_id = ?1
+                 ORDER BY id DESC
+                 LIMIT 25",
             )
+            .bind(guild_id)
             .fetch_all(&self.pool)
             .await?
         } else {
             sqlx::query_as::<_, MarketRecord>(
                 "SELECT id, guild_id, channel_id, creator_discord_user_id, question, status, market_type, liquidity_b, close_time, resolved_option_id, created_at, resolved_at, updated_at, external_source, external_id, external_url, external_slug, last_external_sync_at, external_status, external_resolution
-                 FROM markets WHERE status = ?1 ORDER BY id DESC LIMIT 25",
+                 FROM markets
+                 WHERE guild_id = ?1 AND status = ?2
+                 ORDER BY id DESC
+                 LIMIT 25",
             )
+            .bind(guild_id)
             .bind(status)
             .fetch_all(&self.pool)
             .await?
@@ -158,6 +170,7 @@ impl MarketService {
     #[instrument(skip(self))]
     pub async fn autocomplete_markets(
         &self,
+        guild_id: &str,
         partial: &str,
         status_filter: Option<&str>,
         market_type_filter: Option<&str>,
@@ -168,12 +181,14 @@ impl MarketService {
         let markets = sqlx::query_as::<_, MarketRecord>(
             "SELECT id, guild_id, channel_id, creator_discord_user_id, question, status, market_type, liquidity_b, close_time, resolved_option_id, created_at, resolved_at, updated_at, external_source, external_id, external_url, external_slug, last_external_sync_at, external_status, external_resolution
              FROM markets
-             WHERE (?1 IS NULL OR status = ?1)
-               AND (?2 IS NULL OR market_type = ?2)
-               AND (?3 = '' OR question LIKE ?4 OR CAST(id AS TEXT) LIKE ?4)
+             WHERE guild_id = ?1
+               AND (?2 IS NULL OR status = ?2)
+               AND (?3 IS NULL OR market_type = ?3)
+               AND (?4 = '' OR question LIKE ?5 OR CAST(id AS TEXT) LIKE ?5)
              ORDER BY CASE WHEN status = 'open' THEN 0 ELSE 1 END, id DESC
-             LIMIT ?5",
+             LIMIT ?6",
         )
+        .bind(guild_id)
         .bind(status_filter)
         .bind(market_type_filter)
         .bind(partial)
@@ -257,6 +272,13 @@ impl MarketService {
             detail,
             probabilities,
         })
+    }
+
+    #[instrument(skip(self))]
+    pub async fn market_view_for_guild(&self, guild_id: &str, market_id: i64) -> AppResult<MarketView> {
+        let view = self.market_view(market_id).await?;
+        self.ensure_market_belongs_to_guild(guild_id, &view.detail.market)?;
+        Ok(view)
     }
 
     #[instrument(skip(self))]
@@ -364,7 +386,13 @@ impl MarketService {
         .await?;
 
         let settlement_result = self
-            .settle_external_if_possible(&mut tx, market_id, &detail.options, &snapshot)
+            .settle_external_if_possible(
+                &mut tx,
+                &detail.market.guild_id,
+                market_id,
+                &detail.options,
+                &snapshot,
+            )
             .await?;
         if settlement_result == MarketStatus::NeedsManualReview {
             warn!(
@@ -438,13 +466,15 @@ impl MarketService {
         Ok(announcements)
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip(self), fields(guild_id, market_id))]
     pub async fn resolve_native_market(
         &self,
+        guild_id: &str,
         market_id: i64,
         winning_label: &str,
     ) -> AppResult<i64> {
         let detail = self.market_detail(market_id).await?;
+        self.ensure_market_belongs_to_guild(guild_id, &detail.market)?;
         if detail.market.market_type() != MarketType::Native {
             return Err(AppError::Validation(
                 "use `/msync` for manifold-tracked markets".to_string(),
@@ -486,6 +516,7 @@ impl MarketService {
         let total_payout = self
             .settle_positions(
                 &mut tx,
+                &detail.market.guild_id,
                 market_id,
                 winner.id,
                 positions,
@@ -504,6 +535,7 @@ impl MarketService {
 
     pub async fn positions_for_user(
         &self,
+        guild_id: &str,
         discord_user_id: &str,
         market_id: Option<i64>,
     ) -> AppResult<Vec<(PositionRecord, MarketRecord, MarketOptionRecord)>> {
@@ -519,9 +551,10 @@ impl MarketService {
                  FROM positions p
                  JOIN markets m ON m.id = p.market_id
                  JOIN market_options o ON o.id = p.option_id
-                 WHERE p.discord_user_id = ?1 AND p.market_id = ?2
+                 WHERE m.guild_id = ?1 AND p.discord_user_id = ?2 AND p.market_id = ?3
                  ORDER BY p.market_id DESC, o.sort_order ASC",
             )
+                .bind(guild_id)
                 .bind(discord_user_id)
                 .bind(market_id)
                 .fetch_all(&self.pool)
@@ -538,9 +571,10 @@ impl MarketService {
                  FROM positions p
                  JOIN markets m ON m.id = p.market_id
                  JOIN market_options o ON o.id = p.option_id
-                 WHERE p.discord_user_id = ?1
+                 WHERE m.guild_id = ?1 AND p.discord_user_id = ?2
                  ORDER BY p.market_id DESC, o.sort_order ASC",
             )
+                .bind(guild_id)
                 .bind(discord_user_id)
                 .fetch_all(&self.pool)
                 .await?
@@ -594,12 +628,13 @@ impl MarketService {
         Ok(out)
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip(self), fields(guild_id, market_id))]
     pub async fn market_holders(
         &self,
+        guild_id: &str,
         market_id: i64,
     ) -> AppResult<(MarketView, Vec<MarketHolderLine>)> {
-        let view = self.market_view(market_id).await?;
+        let view = self.market_view_for_guild(guild_id, market_id).await?;
         let price_by_option_id = view
             .detail
             .options
@@ -618,11 +653,15 @@ impl MarketService {
                 p.discord_user_id,
                 p.option_id
              FROM positions p
+             JOIN markets m ON m.id = p.market_id
              JOIN market_options o ON o.id = p.option_id
-             JOIN users u ON u.discord_user_id = p.discord_user_id
-             WHERE p.market_id = ?1 AND p.shares > 0.0000001
+             LEFT JOIN guild_accounts u
+               ON u.guild_id = m.guild_id
+              AND u.discord_user_id = p.discord_user_id
+             WHERE m.guild_id = ?1 AND p.market_id = ?2 AND p.shares > 0.0000001
              ORDER BY o.sort_order ASC, COALESCE(u.display_name, p.discord_user_id) ASC",
         )
+        .bind(guild_id)
         .bind(market_id)
         .fetch_all(&self.pool)
         .await?;
@@ -715,6 +754,7 @@ impl MarketService {
     async fn settle_external_if_possible(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        guild_id: &str,
         market_id: i64,
         existing_options: &[MarketOptionRecord],
         snapshot: &ExternalMarketSnapshot,
@@ -769,6 +809,7 @@ impl MarketService {
 
             self.settle_positions(
                 tx,
+                guild_id,
                 market_id,
                 winner_option_id,
                 positions,
@@ -795,6 +836,7 @@ impl MarketService {
     async fn settle_positions(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        guild_id: &str,
         market_id: i64,
         winner_option_id: i64,
         positions: Vec<PositionRecord>,
@@ -808,24 +850,28 @@ impl MarketService {
             let payout = position.shares.round() as i64;
             total_payout += payout;
             sqlx::query(
-                "UPDATE users
+                "UPDATE guild_accounts
                  SET balance_mana = balance_mana + ?2, updated_at = ?3
-                 WHERE discord_user_id = ?1",
+                 WHERE guild_id = ?1 AND discord_user_id = ?4",
             )
-            .bind(&position.discord_user_id)
+            .bind(guild_id)
             .bind(payout)
             .bind(now_rfc3339())
+            .bind(&position.discord_user_id)
             .execute(&mut **tx)
             .await?;
 
             sqlx::query(
-                "INSERT INTO balance_events (discord_user_id, amount_mana, reason, related_market_id, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO economy_events
+                 (guild_id, discord_user_id, related_market_id, related_option_id, asset_type, amount_mana, amount_shares, reason, note, created_at)
+                 VALUES (?1, ?2, ?3, ?4, 'money', ?5, NULL, ?6, 'market settlement payout', ?7)",
             )
+            .bind(guild_id)
             .bind(&position.discord_user_id)
+            .bind(market_id)
+            .bind(winner_option_id)
             .bind(payout)
             .bind(reason)
-            .bind(market_id)
             .bind(now_rfc3339())
             .execute(&mut **tx)
             .await?;
@@ -836,13 +882,27 @@ impl MarketService {
     async fn total_external_payout(&self, market_id: i64) -> AppResult<i64> {
         let row = sqlx::query(
             "SELECT COALESCE(SUM(amount_mana), 0) AS total
-             FROM balance_events
+             FROM economy_events
              WHERE related_market_id = ?1 AND reason = 'external_resolution_payout'",
         )
         .bind(market_id)
         .fetch_one(&self.pool)
         .await?;
         Ok(row.get("total"))
+    }
+
+    fn ensure_market_belongs_to_guild(
+        &self,
+        guild_id: &str,
+        market: &MarketRecord,
+    ) -> AppResult<()> {
+        if market.guild_id != guild_id {
+            return Err(AppError::NotFound(format!(
+                "market {} was not found in this server",
+                market.id
+            )));
+        }
+        Ok(())
     }
 }
 

@@ -21,12 +21,20 @@ impl LeaderboardService {
         Self { pool }
     }
 
-    #[instrument(skip(self))]
-    pub async fn top_balances(&self, limit: i64) -> AppResult<Vec<LeaderboardEntry>> {
+    #[instrument(skip(self), fields(guild_id, limit))]
+    pub async fn top_balances(
+        &self,
+        guild_id: &str,
+        limit: i64,
+    ) -> AppResult<Vec<LeaderboardEntry>> {
         sqlx::query_as::<_, LeaderboardEntry>(
             "SELECT discord_user_id, display_name, balance_mana
-             FROM users ORDER BY balance_mana DESC, discord_user_id ASC LIMIT ?1",
+             FROM guild_accounts
+             WHERE guild_id = ?1
+             ORDER BY balance_mana DESC, discord_user_id ASC
+             LIMIT ?2",
         )
+        .bind(guild_id)
         .bind(limit)
         .fetch_all(&self.pool)
         .await

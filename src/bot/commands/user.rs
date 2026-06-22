@@ -22,22 +22,26 @@ pub async fn balance(
     ctx: Context<'_>,
     #[description = "Optional user to inspect"] user: Option<serenity::User>,
 ) -> Result<(), AppError> {
+    let guild_id = ctx.guild_id().ok_or_else(|| {
+        AppError::Validation("balances only exist inside a server economy".to_string())
+    })?;
     let target = user.as_ref().unwrap_or_else(|| ctx.author());
     let name = display_name(target);
     let summary = ctx
         .data()
         .services
         .users
-        .balance(&target.id.to_string(), &name)
+        .balance(&guild_id.to_string(), &target.id.to_string(), &name)
         .await?;
     let cooldown = format_claim_time(summary.next_claim_at);
+    let config = ctx.data().config.as_ref();
     ui::send_embed(
         ctx,
         "💰 Balance Check",
         format!(
             "**{name}** has {}.\n**Total claimed:** {}\n{cooldown}",
-            ui::money(summary.balance_mana),
-            ui::money(summary.total_claimed_mana)
+            ui::money(config, summary.balance_mana),
+            ui::money(config, summary.total_claimed_mana)
         ),
         poise::serenity_prelude::Colour::from_rgb(241, 196, 15),
     )
@@ -47,20 +51,24 @@ pub async fn balance(
 
 #[poise::command(slash_command)]
 pub async fn claim(ctx: Context<'_>) -> Result<(), AppError> {
+    let guild_id = ctx.guild_id().ok_or_else(|| {
+        AppError::Validation("claims only exist inside a server economy".to_string())
+    })?;
     let name = display_name(ctx.author());
     let receipt = ctx
         .data()
         .services
         .users
-        .claim(&ctx.author().id.to_string(), &name)
+        .claim(&guild_id.to_string(), &ctx.author().id.to_string(), &name)
         .await?;
+    let config = ctx.data().config.as_ref();
     ui::send_embed(
         ctx,
         "🪙 Claim Collected",
         format!(
             "The communal cope fountain paid out {}.\n**New balance:** {}\n**Next claim:** {}",
-            ui::money(receipt.amount_mana),
-            ui::money(receipt.balance_mana),
+            ui::money(config, receipt.amount_mana),
+            ui::money(config, receipt.balance_mana),
             discord_timestamp(receipt.next_claim_at)
         ),
         poise::serenity_prelude::Colour::from_rgb(46, 204, 113),

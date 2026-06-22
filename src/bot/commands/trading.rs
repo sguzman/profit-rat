@@ -16,14 +16,18 @@ pub async fn buy(
     #[description = "Option label"]
     #[autocomplete = "autocomplete_market_option"]
     option: String,
-    #[description = "Amount of fake mana to spend"] amount: i64,
+    #[description = "Amount of fake currency to spend"] amount: i64,
 ) -> Result<(), AppError> {
+    let guild_id = ctx.guild_id().ok_or_else(|| {
+        AppError::Validation("trading only works inside a server economy".to_string())
+    })?;
     let market_id = parse_market_id(&market)?;
     let receipt = ctx
         .data()
         .services
         .trading
         .buy(BuyRequest {
+            guild_id: guild_id.to_string(),
             user_id: ctx.author().id.to_string(),
             display_name: display_name(ctx.author()),
             market_id,
@@ -31,6 +35,7 @@ pub async fn buy(
             amount_mana: amount,
         })
         .await?;
+    let config = ctx.data().config.as_ref();
     ui::send_embed(
         ctx,
         "🛒 Position Bought",
@@ -49,11 +54,11 @@ pub async fn buy(
             },
             ui::option_emoji(&receipt.option_label),
             receipt.option_label,
-            ui::money(receipt.mana_amount),
+            ui::money(config, receipt.mana_amount),
             ui::shares(receipt.shares_delta),
             ui::percent(receipt.price_before),
             ui::percent(receipt.price_after),
-            ui::money(receipt.balance_mana)
+            ui::money(config, receipt.balance_mana)
         ),
         poise::serenity_prelude::Colour::from_rgb(46, 204, 113),
     )
@@ -72,12 +77,16 @@ pub async fn sell(
     option: String,
     #[description = "Shares to sell"] shares: f64,
 ) -> Result<(), AppError> {
+    let guild_id = ctx.guild_id().ok_or_else(|| {
+        AppError::Validation("trading only works inside a server economy".to_string())
+    })?;
     let market_id = parse_market_id(&market)?;
     let receipt = ctx
         .data()
         .services
         .trading
         .sell(SellRequest {
+            guild_id: guild_id.to_string(),
             user_id: ctx.author().id.to_string(),
             display_name: display_name(ctx.author()),
             market_id,
@@ -85,6 +94,7 @@ pub async fn sell(
             shares,
         })
         .await?;
+    let config = ctx.data().config.as_ref();
     ui::send_embed(
         ctx,
         "💸 Position Sold",
@@ -103,11 +113,11 @@ pub async fn sell(
             },
             ui::option_emoji(&receipt.option_label),
             receipt.option_label,
-            ui::money(receipt.mana_amount),
+            ui::money(config, receipt.mana_amount),
             ui::shares(receipt.shares_delta),
             ui::percent(receipt.price_before),
             ui::percent(receipt.price_after),
-            ui::money(receipt.balance_mana)
+            ui::money(config, receipt.balance_mana)
         ),
         poise::serenity_prelude::Colour::from_rgb(52, 152, 219),
     )
@@ -126,14 +136,18 @@ pub async fn offer_shares(
     option: String,
     #[description = "User who can accept this offer"] buyer: serenity::User,
     #[description = "Shares to offer"] shares: f64,
-    #[description = "Total price in fake mana"] price_mana: i64,
+    #[description = "Total price in fake currency"] price_mana: i64,
 ) -> Result<(), AppError> {
+    let guild_id = ctx.guild_id().ok_or_else(|| {
+        AppError::Validation("share offers only work inside a server economy".to_string())
+    })?;
     let market_id = parse_market_id(&market)?;
     let receipt = ctx
         .data()
         .services
         .trading
         .create_share_offer(CreateShareOfferRequest {
+            guild_id: guild_id.to_string(),
             seller_user_id: ctx.author().id.to_string(),
             seller_display_name: display_name(ctx.author()),
             buyer_user_id: buyer.id.to_string(),
@@ -146,14 +160,14 @@ pub async fn offer_shares(
         .await?;
     ui::send_embed(
         ctx,
-        "ðŸ¤ Share Offer Sent",
+        "🤝 Share Offer Sent",
         format!(
             "**Offer:** **#{}**\n**Market:** {} **#{}**\n**Option:** {} **{}**\n**Buyer:** <@{}> (**{}**)\n**Shares:** {}\n**Price:** {}\n**Expires:** {}",
             receipt.offer_id,
             if receipt.market_type == "manifold" {
-                "ðŸ›°ï¸"
+                "🛰️"
             } else {
-                "ðŸ“ˆ"
+                "📈"
             },
             receipt.market_id,
             ui::option_emoji(&receipt.option_label),
@@ -161,7 +175,7 @@ pub async fn offer_shares(
             buyer.id,
             receipt.buyer_display_name,
             ui::shares(receipt.shares),
-            ui::money(receipt.price_mana),
+            ui::money(ctx.data().config.as_ref(), receipt.price_mana),
             ui::discord_timestamp(receipt.expires_at)
         ),
         poise::serenity_prelude::Colour::from_rgb(230, 126, 34),
@@ -172,16 +186,19 @@ pub async fn offer_shares(
 
 #[poise::command(slash_command)]
 pub async fn incoming_share_offers(ctx: Context<'_>) -> Result<(), AppError> {
+    let guild_id = ctx.guild_id().ok_or_else(|| {
+        AppError::Validation("offers only exist inside a server economy".to_string())
+    })?;
     let offers = ctx
         .data()
         .services
         .trading
-        .incoming_share_offers(&ctx.author().id.to_string())
+        .incoming_share_offers(&guild_id.to_string(), &ctx.author().id.to_string())
         .await?;
     if offers.is_empty() {
         ui::send_embed(
             ctx,
-            "ðŸ“¨ Incoming Offers",
+            "📨 Incoming Offers",
             "No pending share offers are waiting on you right now.",
             poise::serenity_prelude::Colour::from_rgb(127, 140, 141),
         )
@@ -189,11 +206,12 @@ pub async fn incoming_share_offers(ctx: Context<'_>) -> Result<(), AppError> {
         return Ok(());
     }
 
+    let config = ctx.data().config.as_ref();
     let body = offers
         .into_iter()
         .map(|offer| {
             format!(
-                "**#{}**  ðŸŽ¯ **#{}**\n**{}**\nFrom **{}**  â€¢  {} **{}**\n{} for {}  â€¢  Expires {}",
+                "**#{}** • 🎯 **#{}**\n**{}**\nFrom **{}** • {} **{}**\n{} for {} • Expires {}",
                 offer.offer_id,
                 offer.market_id,
                 offer.market_question,
@@ -201,7 +219,7 @@ pub async fn incoming_share_offers(ctx: Context<'_>) -> Result<(), AppError> {
                 ui::option_emoji(&offer.option_label),
                 offer.option_label,
                 ui::shares(offer.shares),
-                ui::money(offer.price_mana),
+                ui::money(config, offer.price_mana),
                 ui::discord_timestamp(offer.expires_at)
             )
         })
@@ -210,7 +228,7 @@ pub async fn incoming_share_offers(ctx: Context<'_>) -> Result<(), AppError> {
 
     ui::send_embed(
         ctx,
-        "ðŸ“¨ Incoming Offers",
+        "📨 Incoming Offers",
         body,
         poise::serenity_prelude::Colour::from_rgb(52, 152, 219),
     )
@@ -225,35 +243,40 @@ pub async fn accept_share_offer(
     #[autocomplete = "autocomplete_incoming_share_offer"]
     offer: String,
 ) -> Result<(), AppError> {
+    let guild_id = ctx.guild_id().ok_or_else(|| {
+        AppError::Validation("offers only exist inside a server economy".to_string())
+    })?;
     let offer_id = parse_offer_id(&offer)?;
     let receipt = ctx
         .data()
         .services
         .trading
         .accept_share_offer(
+            &guild_id.to_string(),
             offer_id,
             &ctx.author().id.to_string(),
             &display_name(ctx.author()),
         )
         .await?;
+    let config = ctx.data().config.as_ref();
     ui::send_embed(
         ctx,
-        "âœ… Share Offer Accepted",
+        "✅ Share Offer Accepted",
         format!(
             "**Offer:** **#{}**\n**Market:** {} **#{}**\n**Seller:** **{}**\n**Option:** {} **{}**\n**Shares:** {}\n**Paid:** {}\n**New balance:** {}\n**Offer expired at:** {}",
             receipt.offer_id,
             if receipt.market_type == "manifold" {
-                "ðŸ›°ï¸"
+                "🛰️"
             } else {
-                "ðŸ“ˆ"
+                "📈"
             },
             receipt.market_id,
             receipt.counterparty_display_name,
             ui::option_emoji(&receipt.option_label),
             receipt.option_label,
             ui::shares(receipt.shares),
-            ui::money(receipt.price_mana),
-            ui::money(receipt.buyer_balance_mana.unwrap_or(0)),
+            ui::money(config, receipt.price_mana),
+            ui::money(config, receipt.buyer_balance_mana.unwrap_or(0)),
             ui::discord_timestamp(receipt.expires_at)
         ),
         poise::serenity_prelude::Colour::from_rgb(46, 204, 113),
@@ -269,30 +292,33 @@ pub async fn decline_share_offer(
     #[autocomplete = "autocomplete_incoming_share_offer"]
     offer: String,
 ) -> Result<(), AppError> {
+    let guild_id = ctx.guild_id().ok_or_else(|| {
+        AppError::Validation("offers only exist inside a server economy".to_string())
+    })?;
     let offer_id = parse_offer_id(&offer)?;
     let receipt = ctx
         .data()
         .services
         .trading
-        .decline_share_offer(offer_id, &ctx.author().id.to_string())
+        .decline_share_offer(&guild_id.to_string(), offer_id, &ctx.author().id.to_string())
         .await?;
     ui::send_embed(
         ctx,
-        "ðŸš« Share Offer Declined",
+        "🚫 Share Offer Declined",
         format!(
             "**Offer:** **#{}**\n**Market:** {} **#{}**\n**Seller:** **{}**\n**Option:** {} **{}**\n**Shares:** {}\n**Price:** {}\n**Status:** **{}**\n**Would have expired at:** {}",
             receipt.offer_id,
             if receipt.market_type == "manifold" {
-                "ðŸ›°ï¸"
+                "🛰️"
             } else {
-                "ðŸ“ˆ"
+                "📈"
             },
             receipt.market_id,
             receipt.counterparty_display_name,
             ui::option_emoji(&receipt.option_label),
             receipt.option_label,
             ui::shares(receipt.shares),
-            ui::money(receipt.price_mana),
+            ui::money(ctx.data().config.as_ref(), receipt.price_mana),
             receipt.status,
             ui::discord_timestamp(receipt.expires_at)
         ),
@@ -307,11 +333,14 @@ pub async fn positions(
     ctx: Context<'_>,
     #[description = "Optional market filter"] market_id: Option<i64>,
 ) -> Result<(), AppError> {
+    let guild_id = ctx.guild_id().ok_or_else(|| {
+        AppError::Validation("positions only exist inside a server economy".to_string())
+    })?;
     let positions = ctx
         .data()
         .services
         .markets
-        .positions_for_user(&ctx.author().id.to_string(), market_id)
+        .positions_for_user(&guild_id.to_string(), &ctx.author().id.to_string(), market_id)
         .await?;
     if positions.is_empty() {
         ui::send_embed(
@@ -324,11 +353,12 @@ pub async fn positions(
         return Ok(());
     }
 
+    let config = ctx.data().config.as_ref();
     let body = positions
         .into_iter()
         .map(|(position, market, option)| {
             format!(
-                "{} **#{}**  {}\n{} **{}** → {}\nSpent {} • Received {}",
+                "{} **#{}** {}\n{} **{}** → {}\nSpent {} • Received {}",
                 if market.market_type == "manifold" {
                     "🛰️"
                 } else {
@@ -345,8 +375,8 @@ pub async fn positions(
                 },
                 option.label,
                 ui::shares(position.shares),
-                ui::money(position.total_spent_mana),
-                ui::money(position.total_received_mana)
+                ui::money(config, position.total_spent_mana),
+                ui::money(config, position.total_received_mana)
             )
         })
         .collect::<Vec<_>>()
@@ -366,11 +396,14 @@ pub async fn mpositions(
     ctx: Context<'_>,
     #[description = "Optional tracked market filter"] market_id: Option<i64>,
 ) -> Result<(), AppError> {
+    let guild_id = ctx.guild_id().ok_or_else(|| {
+        AppError::Validation("positions only exist inside a server economy".to_string())
+    })?;
     let positions = ctx
         .data()
         .services
         .markets
-        .positions_for_user(&ctx.author().id.to_string(), market_id)
+        .positions_for_user(&guild_id.to_string(), &ctx.author().id.to_string(), market_id)
         .await?
         .into_iter()
         .filter(|(_, market, _)| market.market_type == "manifold")
@@ -386,11 +419,12 @@ pub async fn mpositions(
         return Ok(());
     }
 
+    let config = ctx.data().config.as_ref();
     let body = positions
         .into_iter()
         .map(|(position, market, option)| {
             format!(
-                "🛰️ **#{}**  {}\n{} **{}** → {}\nSpent {} • Received {}",
+                "🛰️ **#{}** {}\n{} **{}** → {}\nSpent {} • Received {}",
                 market.id,
                 market.question,
                 match market.status.as_str() {
@@ -402,8 +436,8 @@ pub async fn mpositions(
                 },
                 option.label,
                 ui::shares(position.shares),
-                ui::money(position.total_spent_mana),
-                ui::money(position.total_received_mana)
+                ui::money(config, position.total_spent_mana),
+                ui::money(config, position.total_received_mana)
             )
         })
         .collect::<Vec<_>>()
@@ -422,10 +456,14 @@ async fn autocomplete_incoming_share_offer(
     ctx: Context<'_>,
     partial: &str,
 ) -> Vec<serenity::AutocompleteChoice> {
+    let Some(guild_id) = ctx.guild_id() else {
+        return Vec::new();
+    };
+
     ctx.data()
         .services
         .trading
-        .autocomplete_incoming_share_offers(&ctx.author().id.to_string(), partial, 20)
+        .autocomplete_incoming_share_offers(&guild_id.to_string(), &ctx.author().id.to_string(), partial, 20)
         .await
         .unwrap_or_default()
 }

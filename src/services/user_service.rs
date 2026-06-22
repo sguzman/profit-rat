@@ -6,7 +6,7 @@ use tracing::instrument;
 
 use crate::config::AppConfig;
 use crate::db::{DbPool, now_rfc3339};
-use crate::domain::market::UserRecord;
+use crate::domain::market::GuildAccountRecord;
 use crate::error::{AppError, AppResult};
 
 #[derive(Clone)]
@@ -34,29 +34,47 @@ impl UserService {
         Self { config, pool }
     }
 
-    #[instrument(skip(self))]
-    pub async fn ensure_user(
+    #[instrument(skip(self), fields(guild_id, discord_user_id))]
+    pub async fn ensure_account(
         &self,
+        guild_id: &str,
         discord_user_id: &str,
         display_name: &str,
-    ) -> AppResult<UserRecord> {
-        if let Some(existing) = sqlx::query_as::<_, UserRecord>(
-            "SELECT discord_user_id, display_name, balance_mana, total_claimed_mana, last_claim_at, created_at, updated_at
-             FROM users WHERE discord_user_id = ?1",
+    ) -> AppResult<GuildAccountRecord> {
+        if let Some(existing) = sqlx::query_as::<_, GuildAccountRecord>(
+            "SELECT id, guild_id, discord_user_id, display_name, balance_mana, total_claimed_mana, last_claim_at, created_at, updated_at
+             FROM guild_accounts
+             WHERE guild_id = ?1 AND discord_user_id = ?2",
         )
+        .bind(guild_id)
         .bind(discord_user_id)
         .fetch_optional(&self.pool)
         .await?
         {
+            if existing.display_name.as_deref() != Some(display_name) {
+                sqlx::query(
+                    "UPDATE guild_accounts
+                     SET display_name = ?3, updated_at = ?4
+                     WHERE guild_id = ?1 AND discord_user_id = ?2",
+                )
+                .bind(guild_id)
+                .bind(discord_user_id)
+                .bind(display_name)
+                .bind(now_rfc3339())
+                .execute(&self.pool)
+                .await?;
+            }
             return Ok(existing);
         }
 
         let now = now_rfc3339();
         let mut tx = self.pool.begin().await?;
         sqlx::query(
-            "INSERT INTO users (discord_user_id, display_name, balance_mana, total_claimed_mana, last_claim_at, created_at, updated_at)
-             VALUES (?1, ?2, ?3, 0, NULL, ?4, ?4)",
+            "INSERT INTO guild_accounts
+             (guild_id, discord_user_id, display_name, balance_mana, total_claimed_mana, last_claim_at, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, 0, NULL, ?5, ?5)",
         )
+        .bind(guild_id)
         .bind(discord_user_id)
         .bind(display_name)
         .bind(self.config.starting_balance)
@@ -65,9 +83,11 @@ impl UserService {
         .await?;
 
         sqlx::query(
-            "INSERT INTO balance_events (discord_user_id, amount_mana, reason, related_market_id, created_at)
-             VALUES (?1, ?2, 'initial_grant', NULL, ?3)",
+            "INSERT INTO economy_events
+             (guild_id, discord_user_id, related_market_id, related_option_id, asset_type, amount_mana, amount_shares, reason, note, created_at)
+             VALUES (?1, ?2, NULL, NULL, 'money', ?3, NULL, 'initial_grant', 'guild bootstrap balance', ?4)",
         )
+        .bind(guild_id)
         .bind(discord_user_id)
         .bind(self.config.starting_balance)
         .bind(&now)
@@ -75,42 +95,50 @@ impl UserService {
         .await?;
         tx.commit().await?;
 
-        sqlx::query_as::<_, UserRecord>(
-            "SELECT discord_user_id, display_name, balance_mana, total_claimed_mana, last_claim_at, created_at, updated_at
-             FROM users WHERE discord_user_id = ?1",
+        sqlx::query_as::<_, GuildAccountRecord>(
+            "SELECT id, guild_id, discord_user_id, display_name, balance_mana, total_claimed_mana, last_claim_at, created_at, updated_at
+             FROM guild_accounts
+             WHERE guild_id = ?1 AND discord_user_id = ?2",
         )
+        .bind(guild_id)
         .bind(discord_user_id)
         .fetch_one(&self.pool)
         .await
         .map_err(Into::into)
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip(self), fields(guild_id, discord_user_id))]
     pub async fn balance(
         &self,
+        guild_id: &str,
         discord_user_id: &str,
         display_name: &str,
     ) -> AppResult<BalanceSummary> {
-        let user = self.ensure_user(discord_user_id, display_name).await?;
-        let next_claim_at = user
+        let account = self
+            .ensure_account(guild_id, discord_user_id, display_name)
+            .await?;
+        let next_claim_at = account
             .last_claim_at()
             .map(|last| last + Duration::seconds(self.config.claim_cooldown_seconds));
         Ok(BalanceSummary {
-            balance_mana: user.balance_mana,
-            total_claimed_mana: user.total_claimed_mana,
+            balance_mana: account.balance_mana,
+            total_claimed_mana: account.total_claimed_mana,
             next_claim_at,
         })
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip(self), fields(guild_id, discord_user_id))]
     pub async fn claim(
         &self,
+        guild_id: &str,
         discord_user_id: &str,
         display_name: &str,
     ) -> AppResult<ClaimReceipt> {
-        let user = self.ensure_user(discord_user_id, display_name).await?;
+        let account = self
+            .ensure_account(guild_id, discord_user_id, display_name)
+            .await?;
         let now = Utc::now();
-        if let Some(last_claim_at) = user.last_claim_at() {
+        if let Some(last_claim_at) = account.last_claim_at() {
             let next = last_claim_at + Duration::seconds(self.config.claim_cooldown_seconds);
             if now < next {
                 return Err(AppError::Conflict(format!(
@@ -123,23 +151,26 @@ impl UserService {
         let claimed_at = now.to_rfc3339();
         let mut tx = self.pool.begin().await?;
         sqlx::query(
-            "UPDATE users
+            "UPDATE guild_accounts
              SET balance_mana = balance_mana + ?2,
                  total_claimed_mana = total_claimed_mana + ?2,
                  last_claim_at = ?3,
                  updated_at = ?3
-             WHERE discord_user_id = ?1",
+             WHERE guild_id = ?1 AND discord_user_id = ?4",
         )
-        .bind(discord_user_id)
+        .bind(guild_id)
         .bind(self.config.hourly_claim)
         .bind(&claimed_at)
+        .bind(discord_user_id)
         .execute(&mut *tx)
         .await?;
 
         sqlx::query(
-            "INSERT INTO balance_events (discord_user_id, amount_mana, reason, related_market_id, created_at)
-             VALUES (?1, ?2, 'hourly_claim', NULL, ?3)",
+            "INSERT INTO economy_events
+             (guild_id, discord_user_id, related_market_id, related_option_id, asset_type, amount_mana, amount_shares, reason, note, created_at)
+             VALUES (?1, ?2, NULL, NULL, 'money', ?3, NULL, 'hourly_claim', 'hourly faucet claim', ?4)",
         )
+        .bind(guild_id)
         .bind(discord_user_id)
         .bind(self.config.hourly_claim)
         .bind(&claimed_at)
@@ -147,11 +178,16 @@ impl UserService {
         .await?;
         tx.commit().await?;
 
-        let balance = sqlx::query("SELECT balance_mana FROM users WHERE discord_user_id = ?1")
-            .bind(discord_user_id)
-            .fetch_one(&self.pool)
-            .await?
-            .get::<i64, _>("balance_mana");
+        let balance = sqlx::query(
+            "SELECT balance_mana
+             FROM guild_accounts
+             WHERE guild_id = ?1 AND discord_user_id = ?2",
+        )
+        .bind(guild_id)
+        .bind(discord_user_id)
+        .fetch_one(&self.pool)
+        .await?
+        .get::<i64, _>("balance_mana");
 
         Ok(ClaimReceipt {
             amount_mana: self.config.hourly_claim,
@@ -167,13 +203,14 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use crate::{config::AppConfig, db};
+    use crate::config::{
+        AppConfig, CurrencyConfig, CurrencyPosition, LoanPolicyConfig, ManifoldConfig,
+        NegativeStyle, PolicyConfig, TransferPolicyConfig,
+    };
+    use crate::db;
 
-    #[tokio::test]
-    async fn claim_enforces_cooldown() {
-        let temp = tempdir().expect("tempdir");
-        let cache_dir = temp.path().join(".cache");
-        let config = Arc::new(AppConfig {
+    fn test_config(cache_dir: std::path::PathBuf) -> AppConfig {
+        AppConfig {
             discord_token: "token".to_string(),
             cache_dir: cache_dir.clone(),
             log_dir: cache_dir.join("logs"),
@@ -189,20 +226,87 @@ mod tests {
             hourly_claim: 100,
             claim_cooldown_seconds: 3_600,
             default_liquidity_b: 100.0,
+            share_offer_expiration_seconds: 60,
+            share_offer_cleanup_interval_seconds: 15,
             manifold_api_base_url: "https://api.manifold.markets/v0".to_string(),
             manifold_snapshot_ttl_seconds: 60,
             manifold_poll_interval_seconds: 120,
-            share_offer_expiration_seconds: 60,
-            share_offer_cleanup_interval_seconds: 15,
-        });
+            policies: PolicyConfig {
+                starting_balance: 1_000,
+                hourly_claim: 100,
+                claim_cooldown_seconds: 3_600,
+                default_liquidity_b: 100.0,
+                share_offer_expiration_seconds: 60,
+                share_offer_cleanup_interval_seconds: 15,
+            },
+            transfers: TransferPolicyConfig {
+                allow_money_donations: true,
+                allow_share_donations: true,
+                allow_money_offers: true,
+                allow_share_offers: true,
+                min_money_transfer: 1,
+                min_share_transfer: 0.01,
+                max_open_offers_per_user: 10,
+            },
+            loans: LoanPolicyConfig {
+                allow_money_loans: true,
+                allow_share_loans: true,
+                allow_partial_repayment: true,
+                allow_early_repayment: true,
+                allow_interest: true,
+                default_interest_bps: 0,
+                max_interest_bps: 2_500,
+                default_duration_seconds: 86_400,
+                max_duration_seconds: 2_592_000,
+                max_open_loans_per_user: 10,
+            },
+            manifold: ManifoldConfig {
+                api_base_url: "https://api.manifold.markets/v0".to_string(),
+                snapshot_ttl_seconds: 60,
+                poll_interval_seconds: 120,
+            },
+            currency: CurrencyConfig {
+                code: "MANA".to_string(),
+                display_name: "Fake Mana".to_string(),
+                singular: "mana".to_string(),
+                plural: "mana".to_string(),
+                symbol: "$".to_string(),
+                textual_symbol: "mana".to_string(),
+                emoji: "💰".to_string(),
+                custom_emoji: String::new(),
+                image_symbol_path: String::new(),
+                image_symbol_url: String::new(),
+                position: CurrencyPosition::Suffix,
+                space_between: true,
+                show_symbol: false,
+                show_textual_symbol: true,
+                show_code: false,
+                use_emoji_in_embeds: true,
+                use_emoji_in_plaintext: true,
+                decimals: 0,
+                thousands_separator: ",".to_string(),
+                negative_style: NegativeStyle::Minus,
+                short_suffixes: false,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn claim_enforces_cooldown() {
+        let temp = tempdir().expect("tempdir");
+        let cache_dir = temp.path().join(".cache");
+        let config = Arc::new(test_config(cache_dir.clone()));
         config.ensure_runtime_dirs().expect("dirs");
         let pool = db::connect(&config).await.expect("pool");
         let service = super::UserService::new(config.clone(), pool);
 
-        let first = service.claim("u1", "Test").await.expect("first claim");
+        let first = service
+            .claim("guild-a", "u1", "Test")
+            .await
+            .expect("first claim");
         assert_eq!(first.balance_mana, 1_100);
 
-        let second = service.claim("u1", "Test").await;
+        let second = service.claim("guild-a", "u1", "Test").await;
         assert!(second.is_err());
     }
 }

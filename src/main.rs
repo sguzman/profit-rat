@@ -38,7 +38,7 @@ async fn main() -> AppResult<()> {
         config.manifold_api_base_url.clone(),
     ));
     let services = services::Services::new(config.clone(), pool, manifold);
-    let framework = bot::build_framework(services.clone());
+    let framework = bot::build_framework(services.clone(), config.clone());
     let intents = serenity::GatewayIntents::non_privileged();
     let mut client = serenity::ClientBuilder::new(discord_token, intents)
         .framework(framework)
