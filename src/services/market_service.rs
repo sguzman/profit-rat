@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use poise::serenity_prelude as serenity;
 use sqlx::Row;
 use tracing::{debug, instrument, warn};
 
@@ -43,6 +44,18 @@ pub struct ListMarketsItem {
     pub question: String,
     pub status: String,
     pub market_type: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct MarketResolutionAnnouncement {
+    pub channel_id: u64,
+    pub market_id: i64,
+    pub question: String,
+    pub status: MarketStatus,
+    pub market_type: MarketType,
+    pub winning_option: Option<String>,
+    pub total_payout: i64,
+    pub external_url: Option<String>,
 }
 
 impl MarketService {
@@ -126,6 +139,47 @@ impl MarketService {
                 question: market.question,
                 status: market.status,
                 market_type: market.market_type,
+            })
+            .collect())
+    }
+
+    #[instrument(skip(self))]
+    pub async fn autocomplete_markets(
+        &self,
+        partial: &str,
+        status_filter: Option<&str>,
+        market_type_filter: Option<&str>,
+        limit: i64,
+    ) -> AppResult<Vec<serenity::AutocompleteChoice>> {
+        let partial = partial.trim();
+        let like = format!("%{partial}%");
+        let markets = sqlx::query_as::<_, MarketRecord>(
+            "SELECT id, guild_id, channel_id, creator_discord_user_id, question, status, market_type, liquidity_b, close_time, resolved_option_id, created_at, resolved_at, updated_at, external_source, external_id, external_url, external_slug, last_external_sync_at, external_status, external_resolution
+             FROM markets
+             WHERE (?1 IS NULL OR status = ?1)
+               AND (?2 IS NULL OR market_type = ?2)
+               AND (?3 = '' OR question LIKE ?4 OR CAST(id AS TEXT) LIKE ?4)
+             ORDER BY CASE WHEN status = 'open' THEN 0 ELSE 1 END, id DESC
+             LIMIT ?5",
+        )
+        .bind(status_filter)
+        .bind(market_type_filter)
+        .bind(partial)
+        .bind(like)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(markets
+            .into_iter()
+            .map(|market| {
+                serenity::AutocompleteChoice::new(
+                    format!(
+                        "#{} [{}|{}] {}",
+                        market.id, market.market_type, market.status, market.question
+                    ),
+                    market.id.to_string(),
+                )
             })
             .collect())
     }
@@ -271,6 +325,67 @@ impl MarketService {
 
         tx.commit().await?;
         self.market_view(market_id).await
+    }
+
+    #[instrument(skip(self))]
+    pub async fn poll_manifold_resolutions(&self) -> AppResult<Vec<MarketResolutionAnnouncement>> {
+        let open_markets = sqlx::query_as::<_, MarketRecord>(
+            "SELECT id, guild_id, channel_id, creator_discord_user_id, question, status, market_type, liquidity_b, close_time, resolved_option_id, created_at, resolved_at, updated_at, external_source, external_id, external_url, external_slug, last_external_sync_at, external_status, external_resolution
+             FROM markets
+             WHERE market_type = 'manifold' AND status = 'open'
+             ORDER BY id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut announcements = Vec::new();
+        for market in open_markets {
+            match self.sync_manifold_market(market.id).await {
+                Ok(view) => {
+                    let status = view.detail.market.status();
+                    if status == MarketStatus::Open {
+                        continue;
+                    }
+
+                    let winning_option =
+                        view.detail.market.resolved_option_id.and_then(|winner_id| {
+                            view.detail
+                                .options
+                                .iter()
+                                .find(|option| option.id == winner_id)
+                                .map(|option| option.label.clone())
+                        });
+                    let total_payout = if status == MarketStatus::Settled {
+                        self.total_external_payout(view.detail.market.id).await?
+                    } else {
+                        0
+                    };
+                    let channel_id =
+                        view.detail.market.channel_id.parse::<u64>().map_err(|_| {
+                            AppError::External(format!(
+                                "invalid channel id stored for market {}",
+                                view.detail.market.id
+                            ))
+                        })?;
+
+                    announcements.push(MarketResolutionAnnouncement {
+                        channel_id,
+                        market_id: view.detail.market.id,
+                        question: view.detail.market.question.clone(),
+                        status,
+                        market_type: view.detail.market.market_type(),
+                        winning_option,
+                        total_payout,
+                        external_url: view.detail.market.external_url.clone(),
+                    });
+                }
+                Err(error) => {
+                    warn!(market_id = market.id, %error, "failed to poll tracked manifold market");
+                }
+            }
+        }
+
+        Ok(announcements)
     }
 
     #[instrument(skip(self))]
@@ -604,6 +719,18 @@ impl MarketService {
             .await?;
         }
         Ok(total_payout)
+    }
+
+    async fn total_external_payout(&self, market_id: i64) -> AppResult<i64> {
+        let row = sqlx::query(
+            "SELECT COALESCE(SUM(amount_mana), 0) AS total
+             FROM balance_events
+             WHERE related_market_id = ?1 AND reason = 'external_resolution_payout'",
+        )
+        .bind(market_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.get("total"))
     }
 }
 

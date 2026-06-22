@@ -56,6 +56,7 @@ mod tests {
             default_liquidity_b: 100.0,
             manifold_api_base_url: "https://api.manifold.markets/v0".to_string(),
             manifold_snapshot_ttl_seconds: 60,
+            manifold_poll_interval_seconds: 120,
         };
 
         config.ensure_runtime_dirs().expect("dirs");

@@ -1,4 +1,5 @@
 use chrono::{DateTime, Local, LocalResult, NaiveDate, NaiveDateTime, TimeZone, Utc};
+use poise::serenity_prelude as serenity;
 
 use crate::bot::ui;
 use crate::bot::{Context, display_name};
@@ -124,8 +125,11 @@ async fn send_markets_list(ctx: Context<'_>, status: Option<String>) -> Result<(
 #[poise::command(slash_command)]
 pub async fn market(
     ctx: Context<'_>,
-    #[description = "Internal market id"] market_id: i64,
+    #[description = "Pick a market"]
+    #[autocomplete = "autocomplete_any_market"]
+    market: String,
 ) -> Result<(), AppError> {
+    let market_id = parse_market_id(&market)?;
     let view = ctx.data().services.markets.market_view(market_id).await?;
     ui::send_market_embed(ctx, "🔎 Market View", &view, None).await?;
     Ok(())
@@ -134,9 +138,12 @@ pub async fn market(
 #[poise::command(slash_command)]
 pub async fn resolve_market(
     ctx: Context<'_>,
-    #[description = "Internal market id"] market_id: i64,
+    #[description = "Pick a native market to resolve"]
+    #[autocomplete = "autocomplete_open_native_market"]
+    market: String,
     #[description = "Winning option label"] winning_option: String,
 ) -> Result<(), AppError> {
+    let market_id = parse_market_id(&market)?;
     let payout = ctx
         .data()
         .services
@@ -195,8 +202,11 @@ pub async fn track_manifold(
 #[poise::command(slash_command)]
 pub async fn manifold_market(
     ctx: Context<'_>,
-    #[description = "Internal market id"] market_id: i64,
+    #[description = "Pick a tracked market"]
+    #[autocomplete = "autocomplete_manifold_market"]
+    market: String,
 ) -> Result<(), AppError> {
+    let market_id = parse_market_id(&market)?;
     let view = ctx.data().services.markets.market_view(market_id).await?;
     ui::send_market_embed(ctx, "🛰️ Manifold View", &view, None).await?;
     Ok(())
@@ -205,8 +215,11 @@ pub async fn manifold_market(
 #[poise::command(slash_command)]
 pub async fn msync(
     ctx: Context<'_>,
-    #[description = "Internal market id"] market_id: i64,
+    #[description = "Pick a tracked market to sync"]
+    #[autocomplete = "autocomplete_manifold_market"]
+    market: String,
 ) -> Result<(), AppError> {
+    let market_id = parse_market_id(&market)?;
     let view = ctx
         .data()
         .services
@@ -221,6 +234,62 @@ pub async fn msync(
     )
     .await?;
     Ok(())
+}
+
+pub(crate) async fn autocomplete_any_market(
+    ctx: Context<'_>,
+    partial: &str,
+) -> Vec<serenity::AutocompleteChoice> {
+    ctx.data()
+        .services
+        .markets
+        .autocomplete_markets(partial, None, None, 20)
+        .await
+        .unwrap_or_default()
+}
+
+pub(crate) async fn autocomplete_open_market(
+    ctx: Context<'_>,
+    partial: &str,
+) -> Vec<serenity::AutocompleteChoice> {
+    ctx.data()
+        .services
+        .markets
+        .autocomplete_markets(partial, Some("open"), None, 20)
+        .await
+        .unwrap_or_default()
+}
+
+pub(crate) async fn autocomplete_open_native_market(
+    ctx: Context<'_>,
+    partial: &str,
+) -> Vec<serenity::AutocompleteChoice> {
+    ctx.data()
+        .services
+        .markets
+        .autocomplete_markets(partial, Some("open"), Some("native"), 20)
+        .await
+        .unwrap_or_default()
+}
+
+pub(crate) async fn autocomplete_manifold_market(
+    ctx: Context<'_>,
+    partial: &str,
+) -> Vec<serenity::AutocompleteChoice> {
+    ctx.data()
+        .services
+        .markets
+        .autocomplete_markets(partial, None, Some("manifold"), 20)
+        .await
+        .unwrap_or_default()
+}
+
+pub(crate) fn parse_market_id(value: &str) -> AppResult<i64> {
+    value.trim().parse::<i64>().map_err(|_| {
+        AppError::Validation(
+            "pick a market from the autocomplete list or enter a numeric market id".to_string(),
+        )
+    })
 }
 
 fn parse_optional_time(value: Option<String>) -> AppResult<Option<DateTime<Utc>>> {

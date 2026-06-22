@@ -16,6 +16,7 @@ pub struct AppConfig {
     pub default_liquidity_b: f64,
     pub manifold_api_base_url: String,
     pub manifold_snapshot_ttl_seconds: i64,
+    pub manifold_poll_interval_seconds: i64,
 }
 
 impl AppConfig {
@@ -44,6 +45,7 @@ impl AppConfig {
             manifold_api_base_url: env::var("MANIFOLD_API_BASE_URL")
                 .unwrap_or_else(|_| "https://api.manifold.markets/v0".to_string()),
             manifold_snapshot_ttl_seconds: env_i64("MANIFOLD_SNAPSHOT_TTL_SECONDS", 60)?,
+            manifold_poll_interval_seconds: env_i64("MANIFOLD_POLL_INTERVAL_SECONDS", 120)?,
         })
     }
 
@@ -122,6 +124,7 @@ mod tests {
             default_liquidity_b: 100.0,
             manifold_api_base_url: "https://api.manifold.markets/v0".to_string(),
             manifold_snapshot_ttl_seconds: 60,
+            manifold_poll_interval_seconds: 120,
         };
 
         config.ensure_runtime_dirs().expect("dirs");

@@ -1,3 +1,4 @@
+use crate::bot::commands::market::{autocomplete_open_market, parse_market_id};
 use crate::bot::ui;
 use crate::bot::{Context, display_name};
 use crate::error::AppError;
@@ -6,10 +7,13 @@ use crate::services::trading_service::{BuyRequest, SellRequest};
 #[poise::command(slash_command)]
 pub async fn buy(
     ctx: Context<'_>,
-    #[description = "Internal market id"] market_id: i64,
+    #[description = "Pick a market"]
+    #[autocomplete = "autocomplete_open_market"]
+    market: String,
     #[description = "Option label"] option: String,
     #[description = "Amount of fake mana to spend"] amount: i64,
 ) -> Result<(), AppError> {
+    let market_id = parse_market_id(&market)?;
     let receipt = ctx
         .data()
         .services
@@ -55,10 +59,13 @@ pub async fn buy(
 #[poise::command(slash_command)]
 pub async fn sell(
     ctx: Context<'_>,
-    #[description = "Internal market id"] market_id: i64,
+    #[description = "Pick a market"]
+    #[autocomplete = "autocomplete_open_market"]
+    market: String,
     #[description = "Option label"] option: String,
     #[description = "Shares to sell"] shares: f64,
 ) -> Result<(), AppError> {
+    let market_id = parse_market_id(&market)?;
     let receipt = ctx
         .data()
         .services

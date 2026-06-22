@@ -4,6 +4,7 @@ mod db;
 mod domain;
 mod error;
 mod integrations;
+mod jobs;
 mod logging;
 mod services;
 
@@ -37,11 +38,12 @@ async fn main() -> AppResult<()> {
         config.manifold_api_base_url.clone(),
     ));
     let services = services::Services::new(config.clone(), pool, manifold);
-    let framework = bot::build_framework(services);
+    let framework = bot::build_framework(services.clone());
     let intents = serenity::GatewayIntents::non_privileged();
     let mut client = serenity::ClientBuilder::new(discord_token, intents)
         .framework(framework)
         .await?;
+    jobs::spawn_background_jobs(config.clone(), services, client.http.clone());
     client.start().await?;
     Ok(())
 }
