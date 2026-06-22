@@ -1,3 +1,4 @@
+mod admin;
 mod bot;
 mod config;
 mod db;
@@ -31,9 +32,13 @@ async fn main() -> AppResult<()> {
         log_dir = %config.log_dir.display(),
         "bootstrapping profit-rat"
     );
+    let pool = db::connect(&config).await?;
+    if admin::maybe_run_from_args(&config, &pool).await? {
+        return Ok(());
+    }
+
     config.validate_for_runtime()?;
     let discord_token = config.discord_token.clone();
-    let pool = db::connect(&config).await?;
     let manifold = Arc::new(integrations::manifold::ManifoldClient::new(
         config.manifold_api_base_url.clone(),
     ));

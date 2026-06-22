@@ -143,6 +143,22 @@ You can also override the config file path with `PROFIT_RAT_CONFIG` or the local
 
 ```env
 DISCORD_TOKEN=your_bot_token_here
+
+## Guild Admin CLI
+
+You can inspect or wipe guild-scoped economy data without starting the Discord bot:
+
+```powershell
+cargo run --release -- guilds list
+cargo run --release -- guilds delete <guild_id> --confirm
+cargo run --release -- guilds delete-all --confirm
+```
+
+Notes:
+- `guilds list` shows every guild economy currently present in the SQLite database.
+- `guilds delete` only removes the specified guild's scoped economy data.
+- `guilds delete-all` removes every guild economy from the database.
+- Destructive commands are blocked unless `--confirm` is present.
 RUST_LOG=profit_rat=debug,info
 ```
 
