@@ -143,6 +143,9 @@ You can also override the config file path with `PROFIT_RAT_CONFIG` or the local
 
 ```env
 DISCORD_TOKEN=your_bot_token_here
+```
+
+Keep `.env` minimal. Policy, balances, liquidity, currency presentation, and Manifold settings should live in `profit-rat.toml`.
 
 ## Guild Admin CLI
 
