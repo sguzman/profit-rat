@@ -1,0 +1,15 @@
+discord_token = ""
+cache_dir = ".cache"
+
+[policies]
+starting_balance = 1000
+hourly_claim = 100
+claim_cooldown_seconds = 3600
+default_liquidity_b = 100.0
+share_offer_expiration_seconds = 60
+share_offer_cleanup_interval_seconds = 15
+
+[manifold]
+api_base_url = "https://api.manifold.markets/v0"
+snapshot_ttl_seconds = 60
+poll_interval_seconds = 120

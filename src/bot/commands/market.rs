@@ -136,6 +136,70 @@ pub async fn market(
 }
 
 #[poise::command(slash_command)]
+pub async fn market_holders(
+    ctx: Context<'_>,
+    #[description = "Pick a market"]
+    #[autocomplete = "autocomplete_any_market"]
+    market: String,
+) -> Result<(), AppError> {
+    let market_id = parse_market_id(&market)?;
+    let (view, holders) = ctx
+        .data()
+        .services
+        .markets
+        .market_holders(market_id)
+        .await?;
+    if holders.is_empty() {
+        ui::send_embed(
+            ctx,
+            "ðŸ‘¥ Market Holders",
+            format!(
+                "{} **{}**\nNo one is holding shares in this market yet.",
+                ui::market_id_line(view.detail.market.id),
+                view.detail.market.question
+            ),
+            ui::market_color(
+                view.detail.market.market_type(),
+                view.detail.market.status(),
+            ),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let body = holders
+        .into_iter()
+        .map(|holder| {
+            format!(
+                "{} **{}**  â€¢  {} **{}**\nHolding {}  â€¢  Value {}  â€¢  P/L {}\nSpent {}  â€¢  Received {}",
+                ui::market_emoji(view.detail.market.market_type()),
+                holder.display_name,
+                ui::option_emoji(&holder.option_label),
+                holder.option_label,
+                ui::shares(holder.shares),
+                ui::money(holder.current_value_mana),
+                ui::money(holder.unrealized_pnl_mana),
+                ui::money(holder.total_spent_mana),
+                ui::money(holder.total_received_mana)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    ui::send_embed(
+        ctx,
+        format!("ðŸ‘¥ Holders {}", ui::market_id_line(view.detail.market.id)),
+        format!("**{}**\n\n{}", view.detail.market.question, body),
+        ui::market_color(
+            view.detail.market.market_type(),
+            view.detail.market.status(),
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
+#[poise::command(slash_command)]
 pub async fn resolve_market(
     ctx: Context<'_>,
     #[description = "Pick a native market to resolve"]

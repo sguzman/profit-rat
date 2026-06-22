@@ -4,7 +4,8 @@ use crate::bot::commands::market::{
 use crate::bot::ui;
 use crate::bot::{Context, display_name};
 use crate::error::AppError;
-use crate::services::trading_service::{BuyRequest, SellRequest};
+use crate::services::trading_service::{BuyRequest, CreateShareOfferRequest, SellRequest};
+use poise::serenity_prelude as serenity;
 
 #[poise::command(slash_command)]
 pub async fn buy(
@@ -109,6 +110,193 @@ pub async fn sell(
             ui::money(receipt.balance_mana)
         ),
         poise::serenity_prelude::Colour::from_rgb(52, 152, 219),
+    )
+    .await?;
+    Ok(())
+}
+
+#[poise::command(slash_command)]
+pub async fn offer_shares(
+    ctx: Context<'_>,
+    #[description = "Pick a market"]
+    #[autocomplete = "autocomplete_open_market"]
+    market: String,
+    #[description = "Option label"]
+    #[autocomplete = "autocomplete_market_option"]
+    option: String,
+    #[description = "User who can accept this offer"] buyer: serenity::User,
+    #[description = "Shares to offer"] shares: f64,
+    #[description = "Total price in fake mana"] price_mana: i64,
+) -> Result<(), AppError> {
+    let market_id = parse_market_id(&market)?;
+    let receipt = ctx
+        .data()
+        .services
+        .trading
+        .create_share_offer(CreateShareOfferRequest {
+            seller_user_id: ctx.author().id.to_string(),
+            seller_display_name: display_name(ctx.author()),
+            buyer_user_id: buyer.id.to_string(),
+            buyer_display_name: display_name(&buyer),
+            market_id,
+            option_label: option,
+            shares,
+            price_mana,
+        })
+        .await?;
+    ui::send_embed(
+        ctx,
+        "ðŸ¤ Share Offer Sent",
+        format!(
+            "**Offer:** **#{}**\n**Market:** {} **#{}**\n**Option:** {} **{}**\n**Buyer:** <@{}> (**{}**)\n**Shares:** {}\n**Price:** {}\n**Expires:** {}",
+            receipt.offer_id,
+            if receipt.market_type == "manifold" {
+                "ðŸ›°ï¸"
+            } else {
+                "ðŸ“ˆ"
+            },
+            receipt.market_id,
+            ui::option_emoji(&receipt.option_label),
+            receipt.option_label,
+            buyer.id,
+            receipt.buyer_display_name,
+            ui::shares(receipt.shares),
+            ui::money(receipt.price_mana),
+            ui::discord_timestamp(receipt.expires_at)
+        ),
+        poise::serenity_prelude::Colour::from_rgb(230, 126, 34),
+    )
+    .await?;
+    Ok(())
+}
+
+#[poise::command(slash_command)]
+pub async fn incoming_share_offers(ctx: Context<'_>) -> Result<(), AppError> {
+    let offers = ctx
+        .data()
+        .services
+        .trading
+        .incoming_share_offers(&ctx.author().id.to_string())
+        .await?;
+    if offers.is_empty() {
+        ui::send_embed(
+            ctx,
+            "ðŸ“¨ Incoming Offers",
+            "No pending share offers are waiting on you right now.",
+            poise::serenity_prelude::Colour::from_rgb(127, 140, 141),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let body = offers
+        .into_iter()
+        .map(|offer| {
+            format!(
+                "**#{}**  ðŸŽ¯ **#{}**\n**{}**\nFrom **{}**  â€¢  {} **{}**\n{} for {}  â€¢  Expires {}",
+                offer.offer_id,
+                offer.market_id,
+                offer.market_question,
+                offer.seller_display_name,
+                ui::option_emoji(&offer.option_label),
+                offer.option_label,
+                ui::shares(offer.shares),
+                ui::money(offer.price_mana),
+                ui::discord_timestamp(offer.expires_at)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    ui::send_embed(
+        ctx,
+        "ðŸ“¨ Incoming Offers",
+        body,
+        poise::serenity_prelude::Colour::from_rgb(52, 152, 219),
+    )
+    .await?;
+    Ok(())
+}
+
+#[poise::command(slash_command)]
+pub async fn accept_share_offer(
+    ctx: Context<'_>,
+    #[description = "Incoming offer to accept"]
+    #[autocomplete = "autocomplete_incoming_share_offer"]
+    offer: String,
+) -> Result<(), AppError> {
+    let offer_id = parse_offer_id(&offer)?;
+    let receipt = ctx
+        .data()
+        .services
+        .trading
+        .accept_share_offer(
+            offer_id,
+            &ctx.author().id.to_string(),
+            &display_name(ctx.author()),
+        )
+        .await?;
+    ui::send_embed(
+        ctx,
+        "âœ… Share Offer Accepted",
+        format!(
+            "**Offer:** **#{}**\n**Market:** {} **#{}**\n**Seller:** **{}**\n**Option:** {} **{}**\n**Shares:** {}\n**Paid:** {}\n**New balance:** {}\n**Offer expired at:** {}",
+            receipt.offer_id,
+            if receipt.market_type == "manifold" {
+                "ðŸ›°ï¸"
+            } else {
+                "ðŸ“ˆ"
+            },
+            receipt.market_id,
+            receipt.counterparty_display_name,
+            ui::option_emoji(&receipt.option_label),
+            receipt.option_label,
+            ui::shares(receipt.shares),
+            ui::money(receipt.price_mana),
+            ui::money(receipt.buyer_balance_mana.unwrap_or(0)),
+            ui::discord_timestamp(receipt.expires_at)
+        ),
+        poise::serenity_prelude::Colour::from_rgb(46, 204, 113),
+    )
+    .await?;
+    Ok(())
+}
+
+#[poise::command(slash_command)]
+pub async fn decline_share_offer(
+    ctx: Context<'_>,
+    #[description = "Incoming offer to decline"]
+    #[autocomplete = "autocomplete_incoming_share_offer"]
+    offer: String,
+) -> Result<(), AppError> {
+    let offer_id = parse_offer_id(&offer)?;
+    let receipt = ctx
+        .data()
+        .services
+        .trading
+        .decline_share_offer(offer_id, &ctx.author().id.to_string())
+        .await?;
+    ui::send_embed(
+        ctx,
+        "ðŸš« Share Offer Declined",
+        format!(
+            "**Offer:** **#{}**\n**Market:** {} **#{}**\n**Seller:** **{}**\n**Option:** {} **{}**\n**Shares:** {}\n**Price:** {}\n**Status:** **{}**\n**Would have expired at:** {}",
+            receipt.offer_id,
+            if receipt.market_type == "manifold" {
+                "ðŸ›°ï¸"
+            } else {
+                "ðŸ“ˆ"
+            },
+            receipt.market_id,
+            receipt.counterparty_display_name,
+            ui::option_emoji(&receipt.option_label),
+            receipt.option_label,
+            ui::shares(receipt.shares),
+            ui::money(receipt.price_mana),
+            receipt.status,
+            ui::discord_timestamp(receipt.expires_at)
+        ),
+        poise::serenity_prelude::Colour::from_rgb(231, 76, 60),
     )
     .await?;
     Ok(())
@@ -228,4 +416,25 @@ pub async fn mpositions(
     )
     .await?;
     Ok(())
+}
+
+async fn autocomplete_incoming_share_offer(
+    ctx: Context<'_>,
+    partial: &str,
+) -> Vec<serenity::AutocompleteChoice> {
+    ctx.data()
+        .services
+        .trading
+        .autocomplete_incoming_share_offers(&ctx.author().id.to_string(), partial, 20)
+        .await
+        .unwrap_or_default()
+}
+
+fn parse_offer_id(value: &str) -> Result<i64, AppError> {
+    value.trim().parse::<i64>().map_err(|_| {
+        AppError::Validation(
+            "pick an incoming offer from the autocomplete list or enter a numeric offer id"
+                .to_string(),
+        )
+    })
 }

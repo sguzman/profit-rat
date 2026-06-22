@@ -4,3 +4,4 @@ tmp
 .cache
 .env
 .sqlx
+profit-rat.local.toml

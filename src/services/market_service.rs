@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -56,6 +57,17 @@ pub struct MarketResolutionAnnouncement {
     pub winning_option: Option<String>,
     pub total_payout: i64,
     pub external_url: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct MarketHolderLine {
+    pub display_name: String,
+    pub option_label: String,
+    pub shares: f64,
+    pub total_spent_mana: i64,
+    pub total_received_mana: i64,
+    pub current_value_mana: i64,
+    pub unrealized_pnl_mana: i64,
 }
 
 impl MarketService {
@@ -580,6 +592,68 @@ impl MarketService {
             out.push((position, market, option));
         }
         Ok(out)
+    }
+
+    #[instrument(skip(self))]
+    pub async fn market_holders(
+        &self,
+        market_id: i64,
+    ) -> AppResult<(MarketView, Vec<MarketHolderLine>)> {
+        let view = self.market_view(market_id).await?;
+        let price_by_option_id = view
+            .detail
+            .options
+            .iter()
+            .zip(view.probabilities.iter())
+            .map(|(option, probability)| (option.id, *probability))
+            .collect::<HashMap<_, _>>();
+
+        let rows = sqlx::query(
+            "SELECT
+                p.shares,
+                p.total_spent_mana,
+                p.total_received_mana,
+                o.label,
+                u.display_name,
+                p.discord_user_id,
+                p.option_id
+             FROM positions p
+             JOIN market_options o ON o.id = p.option_id
+             JOIN users u ON u.discord_user_id = p.discord_user_id
+             WHERE p.market_id = ?1 AND p.shares > 0.0000001
+             ORDER BY o.sort_order ASC, COALESCE(u.display_name, p.discord_user_id) ASC",
+        )
+        .bind(market_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let holders = rows
+            .into_iter()
+            .map(|row| {
+                let option_id = row.get::<i64, _>("option_id");
+                let shares = row.get::<f64, _>("shares");
+                let total_spent_mana = row.get::<i64, _>("total_spent_mana");
+                let total_received_mana = row.get::<i64, _>("total_received_mana");
+                let current_price = price_by_option_id.get(&option_id).copied().unwrap_or(0.0);
+                let current_value_mana = (shares * current_price).round() as i64;
+                let unrealized_pnl_mana =
+                    current_value_mana + total_received_mana - total_spent_mana;
+
+                MarketHolderLine {
+                    display_name: row
+                        .get::<Option<String>, _>("display_name")
+                        .unwrap_or_else(|| row.get::<String, _>("discord_user_id")),
+                    option_label: row.get("label"),
+                    shares,
+                    total_spent_mana,
+                    total_received_mana,
+                    current_value_mana,
+                    unrealized_pnl_mana,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        Ok((view, holders))
     }
 
     async fn insert_snapshot(

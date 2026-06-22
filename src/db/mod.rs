@@ -57,6 +57,8 @@ mod tests {
             manifold_api_base_url: "https://api.manifold.markets/v0".to_string(),
             manifold_snapshot_ttl_seconds: 60,
             manifold_poll_interval_seconds: 120,
+            share_offer_expiration_seconds: 60,
+            share_offer_cleanup_interval_seconds: 15,
         };
 
         config.ensure_runtime_dirs().expect("dirs");

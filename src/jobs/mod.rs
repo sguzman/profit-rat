@@ -14,6 +14,7 @@ pub fn spawn_background_jobs(
     http: Arc<serenity::Http>,
 ) {
     let poll_every = Duration::from_secs(config.manifold_poll_interval_seconds.max(30) as u64);
+    let poll_services = services.clone();
     tokio::spawn(async move {
         info!(
             poll_seconds = poll_every.as_secs(),
@@ -25,8 +26,34 @@ pub fn spawn_background_jobs(
 
         loop {
             interval.tick().await;
-            if let Err(error) = poll_and_announce(&services, &http).await {
+            if let Err(error) = poll_and_announce(&poll_services, &http).await {
                 error!(%error, "manifold resolution poller failed");
+            }
+        }
+    });
+
+    let cleanup_every =
+        Duration::from_secs(config.share_offer_cleanup_interval_seconds.max(5) as u64);
+    let cleanup_services = services.clone();
+    tokio::spawn(async move {
+        info!(
+            cleanup_seconds = cleanup_every.as_secs(),
+            "starting share offer expiry worker"
+        );
+
+        let mut interval = tokio::time::interval(cleanup_every);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        loop {
+            interval.tick().await;
+            match cleanup_services.trading.expire_pending_share_offers().await {
+                Ok(expired) if expired > 0 => {
+                    info!(expired, "expired pending share offers");
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    error!(%error, "share offer expiry worker failed");
+                }
             }
         }
     });

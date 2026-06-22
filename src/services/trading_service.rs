@@ -1,5 +1,8 @@
 use std::sync::Arc;
 
+use chrono::{Duration, Utc};
+use poise::serenity_prelude as serenity;
+use sqlx::FromRow;
 use sqlx::Row;
 use tracing::{debug, instrument};
 
@@ -45,6 +48,82 @@ pub struct TradeReceipt {
     pub shares_delta: f64,
     pub price_before: f64,
     pub price_after: f64,
+}
+
+#[derive(Clone, Debug)]
+pub struct CreateShareOfferRequest {
+    pub seller_user_id: String,
+    pub seller_display_name: String,
+    pub buyer_user_id: String,
+    pub buyer_display_name: String,
+    pub market_id: i64,
+    pub option_label: String,
+    pub shares: f64,
+    pub price_mana: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct ShareOfferReceipt {
+    pub offer_id: i64,
+    pub market_id: i64,
+    pub market_type: String,
+    pub option_label: String,
+    pub buyer_display_name: String,
+    pub shares: f64,
+    pub price_mana: i64,
+    pub expires_at: chrono::DateTime<Utc>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ShareOfferActionReceipt {
+    pub offer_id: i64,
+    pub market_id: i64,
+    pub market_type: String,
+    pub option_label: String,
+    pub counterparty_display_name: String,
+    pub shares: f64,
+    pub price_mana: i64,
+    pub status: String,
+    pub expires_at: chrono::DateTime<Utc>,
+    pub buyer_balance_mana: Option<i64>,
+}
+
+#[derive(Clone, Debug)]
+pub struct IncomingShareOfferSummary {
+    pub offer_id: i64,
+    pub market_id: i64,
+    pub market_question: String,
+    pub seller_display_name: String,
+    pub option_label: String,
+    pub shares: f64,
+    pub price_mana: i64,
+    pub expires_at: chrono::DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, FromRow)]
+struct ShareOfferRecord {
+    id: i64,
+    market_id: i64,
+    option_id: i64,
+    seller_discord_user_id: String,
+    buyer_discord_user_id: String,
+    shares: f64,
+    price_mana: i64,
+    status: String,
+    expires_at: String,
+}
+
+#[derive(Clone, Debug, FromRow)]
+struct IncomingOfferRow {
+    id: i64,
+    market_id: i64,
+    question: String,
+    option_label: String,
+    shares: f64,
+    price_mana: i64,
+    expires_at: String,
+    seller_display_name: Option<String>,
+    seller_discord_user_id: String,
 }
 
 impl TradingService {
@@ -135,6 +214,420 @@ impl TradingService {
                     .await
             }
         }
+    }
+
+    #[instrument(skip(self))]
+    pub async fn create_share_offer(
+        &self,
+        request: CreateShareOfferRequest,
+    ) -> AppResult<ShareOfferReceipt> {
+        self.ensure_user(&request.seller_user_id, &request.seller_display_name)
+            .await?;
+        self.ensure_user(&request.buyer_user_id, &request.buyer_display_name)
+            .await?;
+
+        if request.seller_user_id == request.buyer_user_id {
+            return Err(AppError::Validation(
+                "you cannot sell shares to yourself".to_string(),
+            ));
+        }
+        if request.shares <= 0.0 {
+            return Err(AppError::Validation(
+                "share offer amount must be positive".to_string(),
+            ));
+        }
+        if request.price_mana <= 0 {
+            return Err(AppError::Validation(
+                "offer price must be positive".to_string(),
+            ));
+        }
+
+        let detail = self.load_market(request.market_id).await?;
+        if detail.market.status() != MarketStatus::Open {
+            return Err(AppError::Conflict(
+                "market is not open for share transfers".to_string(),
+            ));
+        }
+
+        let option_index = find_option_index(&detail.options, &request.option_label)?;
+        let option = detail.options[option_index].clone();
+        let seller_shares = self
+            .position_shares(request.market_id, option.id, &request.seller_user_id)
+            .await?;
+        if seller_shares + 1e-9 < request.shares {
+            return Err(AppError::Conflict(
+                "you cannot offer more shares than you currently hold".to_string(),
+            ));
+        }
+
+        let now = Utc::now();
+        let expires_at = now + Duration::seconds(self.config.share_offer_expiration_seconds.max(1));
+        let result = sqlx::query(
+            "INSERT INTO share_transfer_offers
+             (market_id, option_id, seller_discord_user_id, buyer_discord_user_id, shares, price_mana, status, created_at, expires_at, responded_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7, ?8, NULL)",
+        )
+        .bind(request.market_id)
+        .bind(option.id)
+        .bind(&request.seller_user_id)
+        .bind(&request.buyer_user_id)
+        .bind(request.shares)
+        .bind(request.price_mana)
+        .bind(now.to_rfc3339())
+        .bind(expires_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+
+        Ok(ShareOfferReceipt {
+            offer_id: result.last_insert_rowid(),
+            market_id: request.market_id,
+            market_type: detail.market.market_type.clone(),
+            option_label: option.label,
+            buyer_display_name: request.buyer_display_name,
+            shares: request.shares,
+            price_mana: request.price_mana,
+            expires_at,
+        })
+    }
+
+    #[instrument(skip(self))]
+    pub async fn incoming_share_offers(
+        &self,
+        buyer_user_id: &str,
+    ) -> AppResult<Vec<IncomingShareOfferSummary>> {
+        self.expire_pending_share_offers().await?;
+
+        let rows = sqlx::query_as::<_, IncomingOfferRow>(
+            "SELECT
+                o.id,
+                o.market_id,
+                m.question,
+                mo.label AS option_label,
+                o.shares,
+                o.price_mana,
+                o.expires_at,
+                u.display_name AS seller_display_name,
+                o.seller_discord_user_id
+             FROM share_transfer_offers o
+             JOIN markets m ON m.id = o.market_id
+             JOIN market_options mo ON mo.id = o.option_id
+             LEFT JOIN users u ON u.discord_user_id = o.seller_discord_user_id
+             WHERE o.buyer_discord_user_id = ?1 AND o.status = 'pending'
+             ORDER BY o.expires_at ASC, o.id ASC",
+        )
+        .bind(buyer_user_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                Ok(IncomingShareOfferSummary {
+                    offer_id: row.id,
+                    market_id: row.market_id,
+                    market_question: row.question,
+                    seller_display_name: row
+                        .seller_display_name
+                        .unwrap_or(row.seller_discord_user_id),
+                    option_label: row.option_label,
+                    shares: row.shares,
+                    price_mana: row.price_mana,
+                    expires_at: parse_rfc3339_utc(&row.expires_at)?,
+                })
+            })
+            .collect()
+    }
+
+    #[instrument(skip(self))]
+    pub async fn autocomplete_incoming_share_offers(
+        &self,
+        buyer_user_id: &str,
+        partial: &str,
+        limit: i64,
+    ) -> AppResult<Vec<serenity::AutocompleteChoice>> {
+        self.expire_pending_share_offers().await?;
+
+        let trimmed = partial.trim();
+        let like = format!("%{trimmed}%");
+        let rows = sqlx::query_as::<_, IncomingOfferRow>(
+            "SELECT
+                o.id,
+                o.market_id,
+                m.question,
+                mo.label AS option_label,
+                o.shares,
+                o.price_mana,
+                o.expires_at,
+                u.display_name AS seller_display_name,
+                o.seller_discord_user_id
+             FROM share_transfer_offers o
+             JOIN markets m ON m.id = o.market_id
+             JOIN market_options mo ON mo.id = o.option_id
+             LEFT JOIN users u ON u.discord_user_id = o.seller_discord_user_id
+             WHERE o.buyer_discord_user_id = ?1
+               AND o.status = 'pending'
+               AND (?2 = '' OR m.question LIKE ?3 OR mo.label LIKE ?3 OR CAST(o.id AS TEXT) LIKE ?3)
+             ORDER BY o.expires_at ASC, o.id ASC
+             LIMIT ?4",
+        )
+        .bind(buyer_user_id)
+        .bind(trimmed)
+        .bind(like)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                serenity::AutocompleteChoice::new(
+                    format!(
+                        "#{} {} {} from {} for {}",
+                        row.id,
+                        ui_safe_trim(&row.question, 36),
+                        row.option_label,
+                        row.seller_display_name
+                            .as_deref()
+                            .unwrap_or(row.seller_discord_user_id.as_str()),
+                        row.price_mana
+                    ),
+                    row.id.to_string(),
+                )
+            })
+            .collect())
+    }
+
+    #[instrument(skip(self))]
+    pub async fn accept_share_offer(
+        &self,
+        offer_id: i64,
+        buyer_user_id: &str,
+        buyer_display_name: &str,
+    ) -> AppResult<ShareOfferActionReceipt> {
+        self.ensure_user(buyer_user_id, buyer_display_name).await?;
+        self.expire_pending_share_offers().await?;
+
+        let offer = self.load_pending_offer(offer_id).await?;
+        if offer.buyer_discord_user_id != buyer_user_id {
+            return Err(AppError::Conflict(
+                "that offer is not addressed to you".to_string(),
+            ));
+        }
+
+        let expires_at = parse_rfc3339_utc(&offer.expires_at)?;
+        if Utc::now() >= expires_at {
+            self.expire_pending_share_offers().await?;
+            return Err(AppError::Conflict(
+                "that share offer already expired".to_string(),
+            ));
+        }
+
+        let detail = self.load_market(offer.market_id).await?;
+        if detail.market.status() != MarketStatus::Open {
+            return Err(AppError::Conflict(
+                "market is no longer open for share transfers".to_string(),
+            ));
+        }
+
+        let seller_shares = self
+            .position_shares(
+                offer.market_id,
+                offer.option_id,
+                &offer.seller_discord_user_id,
+            )
+            .await?;
+        if seller_shares + 1e-9 < offer.shares {
+            return Err(AppError::Conflict(
+                "seller no longer holds enough shares for that offer".to_string(),
+            ));
+        }
+
+        let buyer_balance = self.user_balance(buyer_user_id).await?;
+        if buyer_balance < offer.price_mana {
+            return Err(AppError::Conflict(
+                "you do not have enough fake mana to accept that offer".to_string(),
+            ));
+        }
+
+        let (current_price, snapshot_id, option_label) = self
+            .current_option_price(offer.market_id, offer.option_id)
+            .await?;
+        let seller_name = self
+            .user_display_name(&offer.seller_discord_user_id)
+            .await?;
+        let now = now_rfc3339();
+
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "UPDATE users SET balance_mana = balance_mana - ?2, updated_at = ?3 WHERE discord_user_id = ?1",
+        )
+        .bind(buyer_user_id)
+        .bind(offer.price_mana)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE users SET balance_mana = balance_mana + ?2, updated_at = ?3 WHERE discord_user_id = ?1",
+        )
+        .bind(&offer.seller_discord_user_id)
+        .bind(offer.price_mana)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+
+        self.upsert_position(
+            &mut tx,
+            offer.market_id,
+            offer.option_id,
+            &offer.seller_discord_user_id,
+            -offer.shares,
+            0,
+            offer.price_mana,
+        )
+        .await?;
+        self.upsert_position(
+            &mut tx,
+            offer.market_id,
+            offer.option_id,
+            buyer_user_id,
+            offer.shares,
+            offer.price_mana,
+            0,
+        )
+        .await?;
+
+        let external_price = if detail.market.market_type() == MarketType::Manifold {
+            Some(current_price)
+        } else {
+            None
+        };
+        self.insert_trade(
+            &mut tx,
+            offer.market_id,
+            offer.option_id,
+            &offer.seller_discord_user_id,
+            "peer_sell",
+            offer.price_mana,
+            -offer.shares,
+            current_price,
+            current_price,
+            external_price,
+            snapshot_id,
+        )
+        .await?;
+        self.insert_trade(
+            &mut tx,
+            offer.market_id,
+            offer.option_id,
+            buyer_user_id,
+            "peer_buy",
+            offer.price_mana,
+            offer.shares,
+            current_price,
+            current_price,
+            external_price,
+            snapshot_id,
+        )
+        .await?;
+        self.insert_balance_event(
+            &mut tx,
+            buyer_user_id,
+            -offer.price_mana,
+            "peer_offer_purchase",
+            offer.market_id,
+        )
+        .await?;
+        self.insert_balance_event(
+            &mut tx,
+            &offer.seller_discord_user_id,
+            offer.price_mana,
+            "peer_offer_sale",
+            offer.market_id,
+        )
+        .await?;
+        sqlx::query(
+            "UPDATE share_transfer_offers
+             SET status = 'accepted', responded_at = ?2
+             WHERE id = ?1 AND status = 'pending'",
+        )
+        .bind(offer.id)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+
+        Ok(ShareOfferActionReceipt {
+            offer_id: offer.id,
+            market_id: offer.market_id,
+            market_type: detail.market.market_type.clone(),
+            option_label,
+            counterparty_display_name: seller_name,
+            shares: offer.shares,
+            price_mana: offer.price_mana,
+            status: "accepted".to_string(),
+            expires_at,
+            buyer_balance_mana: Some(self.user_balance(buyer_user_id).await?),
+        })
+    }
+
+    #[instrument(skip(self))]
+    pub async fn decline_share_offer(
+        &self,
+        offer_id: i64,
+        buyer_user_id: &str,
+    ) -> AppResult<ShareOfferActionReceipt> {
+        self.expire_pending_share_offers().await?;
+        let offer = self.load_pending_offer(offer_id).await?;
+        if offer.buyer_discord_user_id != buyer_user_id {
+            return Err(AppError::Conflict(
+                "that offer is not addressed to you".to_string(),
+            ));
+        }
+
+        let seller_name = self
+            .user_display_name(&offer.seller_discord_user_id)
+            .await?;
+        let detail = self.load_market(offer.market_id).await?;
+        let option = detail
+            .options
+            .iter()
+            .find(|option| option.id == offer.option_id)
+            .ok_or_else(|| AppError::NotFound("offer option is missing".to_string()))?;
+        let now = now_rfc3339();
+        sqlx::query(
+            "UPDATE share_transfer_offers
+             SET status = 'declined', responded_at = ?2
+             WHERE id = ?1 AND status = 'pending'",
+        )
+        .bind(offer.id)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(ShareOfferActionReceipt {
+            offer_id: offer.id,
+            market_id: offer.market_id,
+            market_type: detail.market.market_type.clone(),
+            option_label: option.label.clone(),
+            counterparty_display_name: seller_name,
+            shares: offer.shares,
+            price_mana: offer.price_mana,
+            status: "declined".to_string(),
+            expires_at: parse_rfc3339_utc(&offer.expires_at)?,
+            buyer_balance_mana: None,
+        })
+    }
+
+    #[instrument(skip(self))]
+    pub async fn expire_pending_share_offers(&self) -> AppResult<u64> {
+        let result = sqlx::query(
+            "UPDATE share_transfer_offers
+             SET status = 'expired', responded_at = ?1
+             WHERE status = 'pending' AND expires_at <= ?1",
+        )
+        .bind(now_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
     }
 
     async fn buy_native(
@@ -633,6 +1126,80 @@ impl TradingService {
         Ok(row.map(|row| row.get("shares")).unwrap_or(0.0))
     }
 
+    async fn current_option_price(
+        &self,
+        market_id: i64,
+        option_id: i64,
+    ) -> AppResult<(f64, Option<i64>, String)> {
+        let detail = self.load_market(market_id).await?;
+        match detail.market.market_type() {
+            MarketType::Native => {
+                let option_index = detail
+                    .options
+                    .iter()
+                    .position(|option| option.id == option_id)
+                    .ok_or_else(|| AppError::NotFound("option was not found".to_string()))?;
+                let shares_state = detail
+                    .options
+                    .iter()
+                    .map(|option| option.shares_outstanding)
+                    .collect::<Vec<_>>();
+                let probabilities = lmsr_probabilities(&shares_state, detail.market.liquidity_b)?;
+                Ok((
+                    probabilities[option_index],
+                    None,
+                    detail.options[option_index].label.clone(),
+                ))
+            }
+            MarketType::Manifold => {
+                let (snapshot_id, options) =
+                    self.ensure_recent_external_snapshot(market_id).await?;
+                let option = options
+                    .into_iter()
+                    .find(|option| option.id == option_id)
+                    .ok_or_else(|| AppError::NotFound("option was not found".to_string()))?;
+                Ok((
+                    option
+                        .external_probability
+                        .ok_or_else(|| AppError::External("missing external price".to_string()))?,
+                    snapshot_id,
+                    option.label,
+                ))
+            }
+        }
+    }
+
+    async fn load_pending_offer(&self, offer_id: i64) -> AppResult<ShareOfferRecord> {
+        let offer = sqlx::query_as::<_, ShareOfferRecord>(
+            "SELECT id, market_id, option_id, seller_discord_user_id, buyer_discord_user_id, shares, price_mana, status, expires_at
+             FROM share_transfer_offers
+             WHERE id = ?1",
+        )
+        .bind(offer_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("share offer {offer_id} was not found")))?;
+
+        if offer.status != "pending" {
+            return Err(AppError::Conflict(format!(
+                "share offer #{offer_id} is already {}",
+                offer.status
+            )));
+        }
+
+        Ok(offer)
+    }
+
+    async fn user_display_name(&self, user_id: &str) -> AppResult<String> {
+        let row = sqlx::query("SELECT display_name FROM users WHERE discord_user_id = ?1")
+            .bind(user_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row
+            .and_then(|row| row.get::<Option<String>, _>("display_name"))
+            .unwrap_or_else(|| user_id.to_string()))
+    }
+
     async fn upsert_position(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -726,4 +1293,18 @@ fn find_option_index(options: &[MarketOptionRecord], option_label: &str) -> AppR
         .iter()
         .position(|option| option.label.eq_ignore_ascii_case(option_label))
         .ok_or_else(|| AppError::NotFound(format!("option `{option_label}` was not found")))
+}
+
+fn parse_rfc3339_utc(value: &str) -> AppResult<chrono::DateTime<Utc>> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|value| value.with_timezone(&Utc))
+        .map_err(|_| AppError::Other(anyhow::anyhow!("invalid RFC3339 timestamp: {value}")))
+}
+
+fn ui_safe_trim(value: &str, max_chars: usize) -> String {
+    let mut out = value.chars().take(max_chars).collect::<String>();
+    if value.chars().count() > max_chars {
+        out.push_str("...");
+    }
+    out
 }

@@ -71,8 +71,13 @@ This means normal code/UI changes should not touch your stored bot data unless y
 - `/markets`
 - `/list_markets`
 - `/market`
+- `/market_holders`
 - `/buy`
 - `/sell`
+- `/offer_shares`
+- `/incoming_share_offers`
+- `/accept_share_offer`
+- `/decline_share_offer`
 - `/positions`
 - `/resolve_market`
 
@@ -120,30 +125,28 @@ Typical bot permissions for local testing are enough to:
 - embed links
 - use slash commands
 
-### 2. Create `.env`
+### 2. Configure `profit-rat.toml`
 
-Create a local `.env` file in the repo root:
+The bot now reads its policies and runtime settings from [profit-rat.toml](profit-rat.toml).
+
+For personal overrides and secrets, create an untracked `profit-rat.local.toml`:
+
+```toml
+discord_token = "your_bot_token_here"
+```
+
+You can also override the config file path with `PROFIT_RAT_CONFIG` or the local override path with `PROFIT_RAT_LOCAL_CONFIG`.
+
+### 3. Optional `.env`
+
+`DISCORD_TOKEN` still works as a fallback, so an `.env` like this is also valid:
 
 ```env
 DISCORD_TOKEN=your_bot_token_here
 RUST_LOG=profit_rat=debug,info
-STARTING_BALANCE=1000
-HOURLY_CLAIM=100
-CLAIM_COOLDOWN_SECONDS=3600
-DEFAULT_LIQUIDITY_B=100
-MANIFOLD_API_BASE_URL=https://api.manifold.markets/v0
-MANIFOLD_SNAPSHOT_TTL_SECONDS=60
-MANIFOLD_POLL_INTERVAL_SECONDS=120
 ```
 
-Optional:
-
-```env
-CACHE_DIR=.cache
-DATABASE_URL=sqlite://.cache/discord-bot.sqlite
-```
-
-### 3. Run the bot
+### 4. Run the bot
 
 ```powershell
 cargo run
@@ -169,6 +172,7 @@ Autocomplete is currently wired for:
 
 - market selection on market/trading commands
 - option selection after you choose a market for `/buy`, `/sell`, and `/resolve_market`
+- incoming offer selection for `/accept_share_offer` and `/decline_share_offer`
 
 In Discord, start a slash command, click into the field, and type a little. The dropdown appears while you type.
 
@@ -189,6 +193,25 @@ Runtime data is stored in SQLite under `.cache/discord-bot.sqlite`. Most present
 - a raw Manifold contract ID
 
 The bot normalizes that input, fetches the external market, stores a local mirror, and refreshes snapshots on demand or through the background poller.
+
+## Share Offers
+
+You can now sell shares directly to another user without going through the market maker.
+
+Flow:
+
+- seller runs `/offer_shares`
+- buyer sees the pending offer with `/incoming_share_offers`
+- buyer accepts with `/accept_share_offer` or declines with `/decline_share_offer`
+- pending offers auto-expire after the configured timeout
+
+The expiry window and cleanup interval live in `profit-rat.toml` under `[policies]`:
+
+```toml
+[policies]
+share_offer_expiration_seconds = 60
+share_offer_cleanup_interval_seconds = 15
+```
 
 ## Testing
 
