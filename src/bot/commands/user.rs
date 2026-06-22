@@ -1,3 +1,5 @@
+use chrono::{DateTime, Utc};
+
 use crate::bot::{Context, display_name};
 use crate::error::AppError;
 
@@ -17,10 +19,7 @@ pub async fn balance(ctx: Context<'_>) -> Result<(), AppError> {
         .users
         .balance(&ctx.author().id.to_string(), &name)
         .await?;
-    let cooldown = summary
-        .next_claim_at
-        .map(|value| format!("Next claim: {}", value.to_rfc3339()))
-        .unwrap_or_else(|| "Claim is ready now.".to_string());
+    let cooldown = format_claim_time(summary.next_claim_at);
     ctx.say(format!(
         "{name} has {} mana.\nTotal claimed: {}\n{cooldown}",
         summary.balance_mana, summary.total_claimed_mana
@@ -42,8 +41,19 @@ pub async fn claim(ctx: Context<'_>) -> Result<(), AppError> {
         "The communal cope fountain paid out {} mana.\nBalance: {}\nNext claim: {}",
         receipt.amount_mana,
         receipt.balance_mana,
-        receipt.next_claim_at.to_rfc3339()
+        discord_timestamp(receipt.next_claim_at)
     ))
     .await?;
     Ok(())
+}
+
+fn format_claim_time(next_claim_at: Option<DateTime<Utc>>) -> String {
+    match next_claim_at {
+        Some(value) if value > Utc::now() => format!("Next claim: {}", discord_timestamp(value)),
+        _ => "Claim is ready now.".to_string(),
+    }
+}
+
+fn discord_timestamp(value: DateTime<Utc>) -> String {
+    format!("<t:{}:F> (<t:{}:R>)", value.timestamp(), value.timestamp())
 }
