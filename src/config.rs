@@ -137,7 +137,9 @@ impl AppConfig {
 
         let discord_token = merged
             .discord_token
+            .filter(|value| !value.trim().is_empty())
             .or_else(|| env::var("DISCORD_TOKEN").ok())
+            .filter(|value| !value.trim().is_empty())
             .unwrap_or_default();
         let database_url = merged
             .database_url
