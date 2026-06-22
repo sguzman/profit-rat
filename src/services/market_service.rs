@@ -342,32 +342,40 @@ impl MarketService {
         discord_user_id: &str,
         market_id: Option<i64>,
     ) -> AppResult<Vec<(PositionRecord, MarketRecord, MarketOptionRecord)>> {
-        let mut query = String::from(
-            "SELECT
-                p.id as p_id, p.market_id as p_market_id, p.option_id as p_option_id, p.discord_user_id as p_discord_user_id,
-                p.shares as p_shares, p.total_spent_mana as p_total_spent_mana, p.total_received_mana as p_total_received_mana, p.updated_at as p_updated_at,
-                m.id as m_id, m.guild_id, m.channel_id, m.creator_discord_user_id, m.question, m.status, m.market_type, m.liquidity_b,
-                m.close_time, m.resolved_option_id, m.created_at, m.resolved_at, m.updated_at, m.external_source, m.external_id,
-                m.external_url, m.external_slug, m.last_external_sync_at, m.external_status, m.external_resolution,
-                o.id as o_id, o.market_id as o_market_id, o.label, o.shares_outstanding, o.sort_order, o.external_option_id, o.external_probability
-             FROM positions p
-             JOIN markets m ON m.id = p.market_id
-             JOIN market_options o ON o.id = p.option_id
-             WHERE p.discord_user_id = ?1",
-        );
-        if market_id.is_some() {
-            query.push_str(" AND p.market_id = ?2");
-        }
-        query.push_str(" ORDER BY p.market_id DESC, o.sort_order ASC");
-
         let rows = if let Some(market_id) = market_id {
-            sqlx::query(&query)
+            sqlx::query(
+                "SELECT
+                    p.id as p_id, p.market_id as p_market_id, p.option_id as p_option_id, p.discord_user_id as p_discord_user_id,
+                    p.shares as p_shares, p.total_spent_mana as p_total_spent_mana, p.total_received_mana as p_total_received_mana, p.updated_at as p_updated_at,
+                    m.id as m_id, m.guild_id, m.channel_id, m.creator_discord_user_id, m.question, m.status, m.market_type, m.liquidity_b,
+                    m.close_time, m.resolved_option_id, m.created_at, m.resolved_at, m.updated_at, m.external_source, m.external_id,
+                    m.external_url, m.external_slug, m.last_external_sync_at, m.external_status, m.external_resolution,
+                    o.id as o_id, o.market_id as o_market_id, o.label, o.shares_outstanding, o.sort_order, o.external_option_id, o.external_probability
+                 FROM positions p
+                 JOIN markets m ON m.id = p.market_id
+                 JOIN market_options o ON o.id = p.option_id
+                 WHERE p.discord_user_id = ?1 AND p.market_id = ?2
+                 ORDER BY p.market_id DESC, o.sort_order ASC",
+            )
                 .bind(discord_user_id)
                 .bind(market_id)
                 .fetch_all(&self.pool)
                 .await?
         } else {
-            sqlx::query(&query)
+            sqlx::query(
+                "SELECT
+                    p.id as p_id, p.market_id as p_market_id, p.option_id as p_option_id, p.discord_user_id as p_discord_user_id,
+                    p.shares as p_shares, p.total_spent_mana as p_total_spent_mana, p.total_received_mana as p_total_received_mana, p.updated_at as p_updated_at,
+                    m.id as m_id, m.guild_id, m.channel_id, m.creator_discord_user_id, m.question, m.status, m.market_type, m.liquidity_b,
+                    m.close_time, m.resolved_option_id, m.created_at, m.resolved_at, m.updated_at, m.external_source, m.external_id,
+                    m.external_url, m.external_slug, m.last_external_sync_at, m.external_status, m.external_resolution,
+                    o.id as o_id, o.market_id as o_market_id, o.label, o.shares_outstanding, o.sort_order, o.external_option_id, o.external_probability
+                 FROM positions p
+                 JOIN markets m ON m.id = p.market_id
+                 JOIN market_options o ON o.id = p.option_id
+                 WHERE p.discord_user_id = ?1
+                 ORDER BY p.market_id DESC, o.sort_order ASC",
+            )
                 .bind(discord_user_id)
                 .fetch_all(&self.pool)
                 .await?

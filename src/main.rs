@@ -9,6 +9,7 @@ mod services;
 
 use std::sync::Arc;
 
+use poise::serenity_prelude as serenity;
 use tracing::{info, info_span};
 use uuid::Uuid;
 
@@ -23,15 +24,24 @@ async fn main() -> AppResult<()> {
     let span = info_span!("boot", %session_id);
     let _entered = span.enter();
 
-    info!("bootstrapping profit-rat");
+    info!(
+        database_path = %config.database_path.display(),
+        cache_dir = %config.cache_dir.display(),
+        log_dir = %config.log_dir.display(),
+        "bootstrapping profit-rat"
+    );
     config.validate_for_runtime()?;
+    let discord_token = config.discord_token.clone();
     let pool = db::connect(&config).await?;
     let manifold = Arc::new(integrations::manifold::ManifoldClient::new(
         config.manifold_api_base_url.clone(),
     ));
     let services = services::Services::new(config.clone(), pool, manifold);
-    let framework = bot::build_framework(config, services);
-
-    framework.start().await?;
+    let framework = bot::build_framework(services);
+    let intents = serenity::GatewayIntents::non_privileged();
+    let mut client = serenity::ClientBuilder::new(discord_token, intents)
+        .framework(framework)
+        .await?;
+    client.start().await?;
     Ok(())
 }

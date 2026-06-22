@@ -62,6 +62,7 @@ impl ManifoldClient {
 
     fn normalize(&self, raw: ManifoldMarket) -> AppResult<ExternalMarketSnapshot> {
         debug!(market_id = %raw.id, outcome_type = %raw.outcome_type, "normalizing manifold market");
+        let raw_json = serde_json::to_value(&raw)?;
         let resolution = match raw.resolution.as_deref() {
             Some("YES") => Some(ExternalResolution::BinaryYes),
             Some("NO") => Some(ExternalResolution::BinaryNo),
@@ -133,7 +134,7 @@ impl ManifoldClient {
             status,
             resolution,
             outcomes,
-            raw_json: serde_json::to_value(raw)?,
+            raw_json,
         })
     }
 }

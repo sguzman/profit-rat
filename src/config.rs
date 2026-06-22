@@ -86,6 +86,8 @@ fn normalize_for_sqlite_url(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use tempfile::tempdir;
 
     use super::AppConfig;
@@ -93,9 +95,9 @@ mod tests {
     #[test]
     fn config_defaults_to_cache_paths() {
         let config = AppConfig::from_env().expect("config should load");
-        assert_eq!(config.cache_dir, ".cache".into());
+        assert_eq!(config.cache_dir, PathBuf::from(".cache"));
         assert!(config.database_url.contains(".cache/discord-bot.sqlite"));
-        assert_eq!(config.log_dir, ".cache/logs".into());
+        assert_eq!(config.log_dir, PathBuf::from(".cache/logs"));
     }
 
     #[test]

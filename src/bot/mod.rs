@@ -1,10 +1,7 @@
 pub mod commands;
 
-use std::sync::Arc;
-
 use tracing::{error, info, instrument};
 
-use crate::config::AppConfig;
 use crate::error::AppError;
 use crate::services::Services;
 
@@ -12,14 +9,10 @@ pub type Context<'a> = poise::Context<'a, Data, AppError>;
 
 #[derive(Clone)]
 pub struct Data {
-    pub config: Arc<AppConfig>,
     pub services: Services,
 }
 
-pub fn build_framework(
-    config: Arc<AppConfig>,
-    services: Services,
-) -> poise::Framework<Data, AppError> {
+pub fn build_framework(services: Services) -> poise::Framework<Data, AppError> {
     let options = poise::FrameworkOptions {
         commands: commands::all(),
         pre_command: |ctx| {
@@ -47,12 +40,11 @@ pub fn build_framework(
     poise::Framework::builder()
         .options(options)
         .setup(move |ctx, ready, framework| {
-            let config = config.clone();
             let services = services.clone();
             Box::pin(async move {
                 info!(bot_user = %ready.user.name, "discord bot connected");
                 poise::builtins::register_globally(ctx, &framework.options().commands).await?;
-                Ok(Data { config, services })
+                Ok(Data { services })
             })
         })
         .build()

@@ -9,13 +9,6 @@ pub enum MarketType {
 }
 
 impl MarketType {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Native => "native",
-            Self::Manifold => "manifold",
-        }
-    }
-
     pub fn from_str(value: &str) -> Self {
         match value {
             "manifold" => Self::Manifold,
@@ -58,6 +51,7 @@ impl MarketStatus {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, FromRow)]
 pub struct MarketRecord {
     pub id: i64,
@@ -82,6 +76,7 @@ pub struct MarketRecord {
     pub external_resolution: Option<String>,
 }
 
+#[allow(dead_code)]
 impl MarketRecord {
     pub fn market_type(&self) -> MarketType {
         MarketType::from_str(&self.market_type)
@@ -99,6 +94,7 @@ impl MarketRecord {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, FromRow)]
 pub struct MarketOptionRecord {
     pub id: i64,
@@ -110,6 +106,7 @@ pub struct MarketOptionRecord {
     pub external_probability: Option<f64>,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, FromRow)]
 pub struct PositionRecord {
     pub id: i64,
@@ -122,6 +119,7 @@ pub struct PositionRecord {
     pub updated_at: String,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, FromRow)]
 pub struct UserRecord {
     pub discord_user_id: String,

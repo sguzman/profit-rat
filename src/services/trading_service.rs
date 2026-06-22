@@ -226,7 +226,7 @@ impl TradingService {
     async fn buy_external(
         &self,
         request: BuyRequest,
-        options: &[MarketOptionRecord],
+        _options: &[MarketOptionRecord],
         option_index: usize,
         option: MarketOptionRecord,
     ) -> AppResult<TradeReceipt> {
@@ -385,7 +385,7 @@ impl TradingService {
     async fn sell_external(
         &self,
         request: SellRequest,
-        options: &[MarketOptionRecord],
+        _options: &[MarketOptionRecord],
         option_index: usize,
         option: MarketOptionRecord,
     ) -> AppResult<TradeReceipt> {
