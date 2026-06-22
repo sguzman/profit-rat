@@ -1,3 +1,4 @@
+mod help;
 mod leaderboard;
 mod market;
 mod social;
@@ -8,6 +9,9 @@ use crate::error::AppError;
 
 pub fn all() -> Vec<poise::Command<crate::bot::Data, AppError>> {
     vec![
+        help::help(),
+        help::tutorial(),
+        help::list_commands(),
         user::ping(),
         user::balance(),
         user::claim(),
