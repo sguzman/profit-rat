@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod ui;
 
 use tracing::{error, info, instrument};
 

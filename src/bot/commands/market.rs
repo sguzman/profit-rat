@@ -1,5 +1,6 @@
 use chrono::{DateTime, Local, LocalResult, NaiveDate, NaiveDateTime, TimeZone, Utc};
 
+use crate::bot::ui;
 use crate::bot::{Context, display_name};
 use crate::error::{AppError, AppResult};
 use crate::services::market_service::CreateMarketRequest;
@@ -45,11 +46,15 @@ pub async fn create_market(
             close_time,
         })
         .await?;
-    ctx.say(format!(
-        "{}\nUse `/buy market_id:{} option:<choice> amount:<mana>` to trade.",
-        render_market_view(&view),
-        view.detail.market.id
-    ))
+    ui::send_market_embed(
+        ctx,
+        "📈 Market Opened",
+        &view,
+        Some(format!(
+            "🎯 Use `/buy market_id:{} option:<choice> amount:<mana>` to make your first move.",
+            view.detail.market.id
+        )),
+    )
     .await?;
     Ok(())
 }
@@ -61,7 +66,13 @@ pub async fn list_markets(
 ) -> Result<(), AppError> {
     let markets = ctx.data().services.markets.list_markets(status).await?;
     if markets.is_empty() {
-        ctx.say("No markets matched that filter.").await?;
+        ui::send_embed(
+            ctx,
+            "🗂️ Market List",
+            "No markets matched that filter. The rat found nothing worth fake-betting on.",
+            poise::serenity_prelude::Colour::from_rgb(127, 140, 141),
+        )
+        .await?;
         return Ok(());
     }
 
@@ -69,13 +80,32 @@ pub async fn list_markets(
         .into_iter()
         .map(|market| {
             format!(
-                "#{} [{}|{}] {}",
-                market.id, market.market_type, market.status, market.question
+                "• **#{}**  {}  {}\n  **{}**",
+                market.id,
+                if market.market_type == "manifold" {
+                    "🛰️"
+                } else {
+                    "📈"
+                },
+                match market.status.as_str() {
+                    "open" => "🟢 **Open**",
+                    "settled" => "💸 **Settled**",
+                    "resolved" => "🔨 **Resolved**",
+                    "cancelled" => "⚫ **Cancelled**",
+                    _ => "🟡 **Other**",
+                },
+                market.question
             )
         })
         .collect::<Vec<_>>()
-        .join("\n");
-    ctx.say(body).await?;
+        .join("\n\n");
+    ui::send_embed(
+        ctx,
+        "🗂️ Market List",
+        body,
+        poise::serenity_prelude::Colour::from_rgb(52, 152, 219),
+    )
+    .await?;
     Ok(())
 }
 
@@ -85,7 +115,7 @@ pub async fn market(
     #[description = "Internal market id"] market_id: i64,
 ) -> Result<(), AppError> {
     let view = ctx.data().services.markets.market_view(market_id).await?;
-    ctx.say(render_market_view(&view)).await?;
+    ui::send_market_embed(ctx, "🔎 Market View", &view, None).await?;
     Ok(())
 }
 
@@ -101,9 +131,18 @@ pub async fn resolve_market(
         .markets
         .resolve_native_market(market_id, &winning_option)
         .await?;
-    ctx.say(format!(
-        "Market #{market_id} settled.\nWinning option: {winning_option}\nTotal payout: {payout} mana"
-    ))
+    ui::send_embed(
+        ctx,
+        "🔨 Market Resolved",
+        format!(
+            "Market **#{}** has been settled.\n**Winning option:** {} **{}**\n**Total payout:** {}",
+            market_id,
+            ui::option_emoji(&winning_option),
+            winning_option,
+            ui::money(payout)
+        ),
+        poise::serenity_prelude::Colour::from_rgb(52, 152, 219),
+    )
     .await?;
     Ok(())
 }
@@ -128,11 +167,15 @@ pub async fn track_manifold(
             &url_or_id,
         )
         .await?;
-    ctx.say(format!(
-        "Tracking Manifold market.\nCreated by: {}\n{}",
-        display_name(ctx.author()),
-        render_market_view(&view)
-    ))
+    ui::send_market_embed(
+        ctx,
+        "🛰️ Manifold Market Tracked",
+        &view,
+        Some(format!(
+            "Tracked by **{}**. Your fake bets will mirror Manifold prices without placing real trades.",
+            display_name(ctx.author())
+        )),
+    )
     .await?;
     Ok(())
 }
@@ -143,7 +186,7 @@ pub async fn manifold_market(
     #[description = "Internal market id"] market_id: i64,
 ) -> Result<(), AppError> {
     let view = ctx.data().services.markets.market_view(market_id).await?;
-    ctx.say(render_market_view(&view)).await?;
+    ui::send_market_embed(ctx, "🛰️ Manifold View", &view, None).await?;
     Ok(())
 }
 
@@ -158,61 +201,18 @@ pub async fn msync(
         .markets
         .sync_manifold_market(market_id)
         .await?;
-    ctx.say(format!(
-        "Synced tracked market.\n{}",
-        render_market_view(&view)
-    ))
+    ui::send_market_embed(
+        ctx,
+        "🔄 Manifold Synced",
+        &view,
+        Some("Fresh snapshot pulled from Manifold.".to_string()),
+    )
     .await?;
     Ok(())
 }
 
 fn parse_optional_time(value: Option<String>) -> AppResult<Option<DateTime<Utc>>> {
     value.map(|value| parse_human_time(&value)).transpose()
-}
-
-fn render_market_view(view: &crate::services::market_service::MarketView) -> String {
-    let close_time = view
-        .detail
-        .market
-        .close_time()
-        .map(|value| {
-            format!(
-                "\nCloses: <t:{}:F> (<t:{}:R>)",
-                value.timestamp(),
-                value.timestamp()
-            )
-        })
-        .unwrap_or_default();
-    let header = format!(
-        "Market #{} [{}|{}]\n{}",
-        view.detail.market.id,
-        view.detail.market.market_type,
-        view.detail.market.status,
-        view.detail.market.question
-    );
-    let body = view
-        .detail
-        .options
-        .iter()
-        .zip(view.probabilities.iter())
-        .map(|(option, probability)| {
-            format!(
-                "{}: {:.2}% | shares {:.2}",
-                option.label,
-                probability * 100.0,
-                option.shares_outstanding
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let footer = view
-        .detail
-        .market
-        .external_url
-        .as_ref()
-        .map(|value| format!("\nSource: {value}"))
-        .unwrap_or_default();
-    format!("{header}{close_time}\n{body}{footer}")
 }
 
 fn parse_human_time(value: &str) -> AppResult<DateTime<Utc>> {

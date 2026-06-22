@@ -1,12 +1,18 @@
 use chrono::{DateTime, Utc};
 
+use crate::bot::ui;
 use crate::bot::{Context, display_name};
 use crate::error::AppError;
 
 #[poise::command(slash_command)]
 pub async fn ping(ctx: Context<'_>) -> Result<(), AppError> {
-    ctx.say("profit-rat is alive, logging, and hoarding fake mana.")
-        .await?;
+    ui::send_embed(
+        ctx,
+        "🐀 Profit Rat Online",
+        "The rat is awake, logging hard, and hoarding fake mana for the server.",
+        poise::serenity_prelude::Colour::from_rgb(52, 152, 219),
+    )
+    .await?;
     Ok(())
 }
 
@@ -20,10 +26,16 @@ pub async fn balance(ctx: Context<'_>) -> Result<(), AppError> {
         .balance(&ctx.author().id.to_string(), &name)
         .await?;
     let cooldown = format_claim_time(summary.next_claim_at);
-    ctx.say(format!(
-        "{name} has {} mana.\nTotal claimed: {}\n{cooldown}",
-        summary.balance_mana, summary.total_claimed_mana
-    ))
+    ui::send_embed(
+        ctx,
+        "💰 Balance Check",
+        format!(
+            "**{name}** has {}.\n**Total claimed:** {}\n{cooldown}",
+            ui::money(summary.balance_mana),
+            ui::money(summary.total_claimed_mana)
+        ),
+        poise::serenity_prelude::Colour::from_rgb(241, 196, 15),
+    )
     .await?;
     Ok(())
 }
@@ -37,12 +49,17 @@ pub async fn claim(ctx: Context<'_>) -> Result<(), AppError> {
         .users
         .claim(&ctx.author().id.to_string(), &name)
         .await?;
-    ctx.say(format!(
-        "The communal cope fountain paid out {} mana.\nBalance: {}\nNext claim: {}",
-        receipt.amount_mana,
-        receipt.balance_mana,
-        discord_timestamp(receipt.next_claim_at)
-    ))
+    ui::send_embed(
+        ctx,
+        "🪙 Claim Collected",
+        format!(
+            "The communal cope fountain paid out {}.\n**New balance:** {}\n**Next claim:** {}",
+            ui::money(receipt.amount_mana),
+            ui::money(receipt.balance_mana),
+            discord_timestamp(receipt.next_claim_at)
+        ),
+        poise::serenity_prelude::Colour::from_rgb(46, 204, 113),
+    )
     .await?;
     Ok(())
 }
