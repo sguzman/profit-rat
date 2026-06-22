@@ -12,6 +12,16 @@ pub async fn maybe_run_from_args(config: &AppConfig, pool: &DbPool) -> AppResult
     }
 
     match args.as_slice() {
+        [flag] if flag == "--help" || flag == "-h" || flag == "help" => {
+            print_global_help();
+            Ok(true)
+        }
+        [group, flag]
+            if group == "guilds" && (flag == "--help" || flag == "-h" || flag == "help") =>
+        {
+            print_guild_help();
+            Ok(true)
+        }
         [group, action] if group == "guilds" && action == "list" => {
             list_guilds(pool).await?;
             Ok(true)
@@ -41,11 +51,27 @@ pub async fn maybe_run_from_args(config: &AppConfig, pool: &DbPool) -> AppResult
                 "refusing to delete all guild data without `--confirm`.\nusage: profit-rat guilds delete-all --confirm".to_string(),
             ),
         ),
-        [group, ..] if group == "guilds" => Err(AppError::Validation(
-            "usage:\n  profit-rat guilds list\n  profit-rat guilds delete <guild_id> --confirm\n  profit-rat guilds delete-all --confirm".to_string(),
-        )),
+        [group, ..] if group == "guilds" => Err(AppError::Validation(guild_help_text())),
         _ => Ok(false),
     }
+}
+
+fn print_global_help() {
+    println!("Profit Rat CLI");
+    println!();
+    println!("Usage:");
+    println!("  profit-rat guilds list");
+    println!("  profit-rat guilds delete <guild_id> --confirm");
+    println!("  profit-rat guilds delete-all --confirm");
+    println!("  profit-rat guilds --help");
+}
+
+fn print_guild_help() {
+    println!("{}", guild_help_text());
+}
+
+fn guild_help_text() -> String {
+    "Guild admin usage:\n  profit-rat guilds list\n  profit-rat guilds delete <guild_id> --confirm\n  profit-rat guilds delete-all --confirm".to_string()
 }
 
 #[instrument(skip(pool))]
