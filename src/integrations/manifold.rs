@@ -1,6 +1,6 @@
 use reqwest::Client;
 use serde::Deserialize;
-use tracing::{debug, instrument};
+use tracing::{debug, instrument, warn};
 use url::Url;
 
 use crate::domain::external_market::{
@@ -24,20 +24,15 @@ impl ManifoldClient {
 
     #[instrument(skip(self))]
     pub async fn fetch_market(&self, url_or_id: &str) -> AppResult<ExternalMarketSnapshot> {
-        if url_or_id.starts_with("http://") || url_or_id.starts_with("https://") {
-            let parsed = Url::parse(url_or_id)?;
-            if let Some(slug) = parsed.path_segments().and_then(|segments| segments.last()) {
-                return self.fetch_market_by_slug(slug).await;
-            }
+        let trimmed = url_or_id.trim();
+
+        if let Some(slug) = extract_slug_candidate(trimmed) {
+            debug!(input = %trimmed, slug = %slug, "fetching manifold market by slug");
+            return self.fetch_market_by_slug(&slug).await;
         }
 
-        if url_or_id.contains('/') {
-            return self
-                .fetch_market_by_slug(url_or_id.rsplit('/').next().unwrap_or(url_or_id))
-                .await;
-        }
-
-        self.fetch_market_by_id(url_or_id).await
+        debug!(input = %trimmed, "fetching manifold market by id");
+        self.fetch_market_by_id(trimmed).await
     }
 
     #[instrument(skip(self))]
@@ -47,17 +42,44 @@ impl ManifoldClient {
             self.base_url.trim_end_matches('/'),
             market_id
         );
-        let response = self.http.get(url).send().await?.error_for_status()?;
-        let raw = response.json::<ManifoldMarket>().await?;
+        let raw = self.fetch_market_payload(&url).await?;
         self.normalize(raw)
     }
 
     #[instrument(skip(self))]
     pub async fn fetch_market_by_slug(&self, slug: &str) -> AppResult<ExternalMarketSnapshot> {
         let url = format!("{}/slug/{}", self.base_url.trim_end_matches('/'), slug);
-        let response = self.http.get(url).send().await?.error_for_status()?;
-        let raw = response.json::<ManifoldMarket>().await?;
+        let raw = self.fetch_market_payload(&url).await?;
         self.normalize(raw)
+    }
+
+    #[instrument(skip(self))]
+    async fn fetch_market_payload(&self, url: &str) -> AppResult<ManifoldMarket> {
+        let response = self.http.get(url).send().await?;
+        let status = response.status();
+        let body = response.text().await?;
+
+        if !status.is_success() {
+            warn!(
+                %url,
+                %status,
+                body = %truncate_for_log(&body),
+                "manifold request returned non-success status"
+            );
+            return Err(AppError::External(format!(
+                "manifold request failed with status {status}"
+            )));
+        }
+
+        serde_json::from_str::<ManifoldMarket>(&body).map_err(|error| {
+            warn!(
+                %url,
+                %error,
+                body = %truncate_for_log(&body),
+                "failed to decode manifold market payload"
+            );
+            AppError::External("manifold returned an unexpected response body".to_string())
+        })
     }
 
     fn normalize(&self, raw: ManifoldMarket) -> AppResult<ExternalMarketSnapshot> {
@@ -139,6 +161,47 @@ impl ManifoldClient {
     }
 }
 
+fn extract_slug_candidate(input: &str) -> Option<String> {
+    let trimmed = input.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        let parsed = Url::parse(trimmed).ok()?;
+        let segments = parsed
+            .path_segments()?
+            .filter(|segment| !segment.is_empty())
+            .collect::<Vec<_>>();
+        return segments.last().map(|segment| (*segment).to_string());
+    }
+
+    let without_host = trimmed
+        .strip_prefix("manifold.markets/")
+        .or_else(|| trimmed.strip_prefix("www.manifold.markets/"))
+        .or_else(|| trimmed.strip_prefix("api.manifold.markets/v0/slug/"))
+        .unwrap_or(trimmed);
+
+    if !without_host.contains('/') {
+        return None;
+    }
+
+    without_host
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .next_back()
+        .map(ToOwned::to_owned)
+}
+
+fn truncate_for_log(body: &str) -> String {
+    const LIMIT: usize = 400;
+    if body.len() <= LIMIT {
+        body.to_string()
+    } else {
+        format!("{}...", &body[..LIMIT])
+    }
+}
+
 #[derive(Debug, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ManifoldMarket {
@@ -162,4 +225,32 @@ struct ManifoldAnswer {
     text: String,
     number: i64,
     probability: Option<f64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_slug_candidate;
+
+    #[test]
+    fn extracts_slug_from_full_market_url() {
+        assert_eq!(
+            extract_slug_candidate(
+                "https://manifold.markets/ManifoldSports/arg-vs-aut-world-cup-26"
+            ),
+            Some("arg-vs-aut-world-cup-26".to_string())
+        );
+    }
+
+    #[test]
+    fn extracts_slug_from_hostless_path() {
+        assert_eq!(
+            extract_slug_candidate("manifold.markets/ManifoldSports/arg-vs-aut-world-cup-26"),
+            Some("arg-vs-aut-world-cup-26".to_string())
+        );
+    }
+
+    #[test]
+    fn does_not_treat_bare_id_as_slug() {
+        assert_eq!(extract_slug_candidate("QOUnZl2nNU"), None);
+    }
 }

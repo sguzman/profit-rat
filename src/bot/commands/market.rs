@@ -52,7 +52,7 @@ pub async fn create_market(
         "📈 Market Opened",
         &view,
         Some(format!(
-            "🎯 Use `/buy market_id:{} option:<choice> amount:<mana>` to make your first move.",
+            "🎯 Use `/buy market:<pick from dropdown> option:<pick from dropdown> amount:<mana>` to make your first move. Market ID: **#{}**.",
             view.detail.market.id
         )),
     )
@@ -141,7 +141,9 @@ pub async fn resolve_market(
     #[description = "Pick a native market to resolve"]
     #[autocomplete = "autocomplete_open_native_market"]
     market: String,
-    #[description = "Winning option label"] winning_option: String,
+    #[description = "Winning option label"]
+    #[autocomplete = "autocomplete_market_option"]
+    winning_option: String,
 ) -> Result<(), AppError> {
     let market_id = parse_market_id(&market)?;
     let payout = ctx
@@ -284,11 +286,45 @@ pub(crate) async fn autocomplete_manifold_market(
         .unwrap_or_default()
 }
 
+pub(crate) async fn autocomplete_market_option(
+    ctx: Context<'_>,
+    partial: &str,
+) -> Vec<serenity::AutocompleteChoice> {
+    let Some(market_id) = selected_market_id(ctx) else {
+        return Vec::new();
+    };
+
+    ctx.data()
+        .services
+        .markets
+        .autocomplete_market_options(market_id, partial, 20)
+        .await
+        .unwrap_or_default()
+}
+
 pub(crate) fn parse_market_id(value: &str) -> AppResult<i64> {
     value.trim().parse::<i64>().map_err(|_| {
         AppError::Validation(
             "pick a market from the autocomplete list or enter a numeric market id".to_string(),
         )
+    })
+}
+
+fn selected_market_id(ctx: Context<'_>) -> Option<i64> {
+    let poise::Context::Application(app) = ctx else {
+        return None;
+    };
+
+    app.args.iter().find_map(|arg| {
+        if arg.name != "market" {
+            return None;
+        }
+
+        match &arg.value {
+            serenity::ResolvedValue::String(value) => parse_market_id(value).ok(),
+            serenity::ResolvedValue::Autocomplete { value, .. } => parse_market_id(value).ok(),
+            _ => None,
+        }
     })
 }
 

@@ -1,4 +1,6 @@
-use crate::bot::commands::market::{autocomplete_open_market, parse_market_id};
+use crate::bot::commands::market::{
+    autocomplete_market_option, autocomplete_open_market, parse_market_id,
+};
 use crate::bot::ui;
 use crate::bot::{Context, display_name};
 use crate::error::AppError;
@@ -10,7 +12,9 @@ pub async fn buy(
     #[description = "Pick a market"]
     #[autocomplete = "autocomplete_open_market"]
     market: String,
-    #[description = "Option label"] option: String,
+    #[description = "Option label"]
+    #[autocomplete = "autocomplete_market_option"]
+    option: String,
     #[description = "Amount of fake mana to spend"] amount: i64,
 ) -> Result<(), AppError> {
     let market_id = parse_market_id(&market)?;
@@ -62,7 +66,9 @@ pub async fn sell(
     #[description = "Pick a market"]
     #[autocomplete = "autocomplete_open_market"]
     market: String,
-    #[description = "Option label"] option: String,
+    #[description = "Option label"]
+    #[autocomplete = "autocomplete_market_option"]
+    option: String,
     #[description = "Shares to sell"] shares: f64,
 ) -> Result<(), AppError> {
     let market_id = parse_market_id(&market)?;

@@ -185,6 +185,44 @@ impl MarketService {
     }
 
     #[instrument(skip(self))]
+    pub async fn autocomplete_market_options(
+        &self,
+        market_id: i64,
+        partial: &str,
+        limit: i64,
+    ) -> AppResult<Vec<serenity::AutocompleteChoice>> {
+        let partial = partial.trim();
+        let like = format!("%{partial}%");
+        let options = sqlx::query_as::<_, MarketOptionRecord>(
+            "SELECT id, market_id, label, shares_outstanding, sort_order, external_option_id, external_probability
+             FROM market_options
+             WHERE market_id = ?1
+               AND (?2 = '' OR label LIKE ?3)
+             ORDER BY sort_order ASC
+             LIMIT ?4",
+        )
+        .bind(market_id)
+        .bind(partial)
+        .bind(like)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(options
+            .into_iter()
+            .map(|option| {
+                let display = match option.external_probability {
+                    Some(probability) => {
+                        format!("{} ({:.1}%)", option.label, probability * 100.0)
+                    }
+                    None => option.label.clone(),
+                };
+                serenity::AutocompleteChoice::new(display, option.label)
+            })
+            .collect())
+    }
+
+    #[instrument(skip(self))]
     pub async fn market_view(&self, market_id: i64) -> AppResult<MarketView> {
         let detail = self.market_detail(market_id).await?;
         let probabilities = match detail.market.market_type() {
