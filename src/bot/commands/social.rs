@@ -97,6 +97,7 @@ pub async fn offer_loan_money(
     #[description = "Optional duration in hours"] duration_hours: Option<i64>,
 ) -> Result<(), AppError> {
     let guild_id = require_guild(ctx)?;
+    let duration_seconds = duration_hours.map(|hours| hours * 3600);
     let receipt = ctx
         .data()
         .services
@@ -109,9 +110,15 @@ pub async fn offer_loan_money(
             &display_name(&user),
             amount,
             interest_bps,
-            duration_hours.map(|hours| hours * 3600),
+            duration_seconds,
         )
         .await?;
+
+    let bot_user = ctx.serenity_context().cache.current_user().clone();
+    if user.id == bot_user.id {
+        return handle_bot_money_loan_offer(ctx, &guild_id, receipt, interest_bps, duration_seconds).await;
+    }
+
     ui::send_embed(
         ctx,
         "🧾 Money Loan Offered",
@@ -147,6 +154,7 @@ pub async fn offer_loan_shares(
 ) -> Result<(), AppError> {
     let guild_id = require_guild(ctx)?;
     let market_id = parse_market_id(&market)?;
+    let duration_seconds = duration_hours.map(|hours| hours * 3600);
     let receipt = ctx
         .data()
         .services
@@ -161,9 +169,35 @@ pub async fn offer_loan_shares(
             &option,
             shares,
             interest_bps,
-            duration_hours.map(|hours| hours * 3600),
+            duration_seconds,
         )
         .await?;
+
+    let bot_user = ctx.serenity_context().cache.current_user().clone();
+    if user.id == bot_user.id {
+        let decline = ctx
+            .data()
+            .services
+            .social
+            .decline_loan(&guild_id, receipt.loan_id, &bot_user.id.to_string())
+            .await?;
+        let bot_name = bot_user
+            .global_name
+            .clone()
+            .unwrap_or_else(|| bot_user.name.clone());
+        ui::send_embed(
+            ctx,
+            "🤖 Rat Declined Loan",
+            format!(
+                "**Loan:** **#{}**\n**Borrower:** **{}**\nProfit Rat only accepts **money loans** right now, not share loans.\n**Status:** **{}**",
+                decline.loan_id, bot_name, decline.status
+            ),
+            poise::serenity_prelude::Colour::from_rgb(231, 76, 60),
+        )
+        .await?;
+        return Ok(());
+    }
+
     ui::send_embed(
         ctx,
         "🧾 Share Loan Offered",
@@ -220,7 +254,7 @@ pub async fn incoming_loans(ctx: Context<'_>) -> Result<(), AppError> {
                 ui::shares(loan.repayment_shares.unwrap_or(0.0))
             };
             format!(
-                "**#{}** from **{}**\nPrincipal: {} • Repayment: {}\nExpires {} • Due {}",
+                "**#{}** from **{}**\nPrincipal: {} | Repayment: {}\nExpires {} | Due {}",
                 loan.loan_id,
                 loan.lender_display_name,
                 principal,
@@ -342,7 +376,7 @@ pub async fn loan_status(ctx: Context<'_>) -> Result<(), AppError> {
                 ui::shares((loan.repayment_shares.unwrap_or(0.0) - loan.repaid_shares).max(0.0))
             };
             format!(
-                "**#{}** • {} with **{}**\nPrincipal: {} • Remaining: {}\nStatus: **{}** • Due {}",
+                "**#{}** | {} with **{}**\nPrincipal: {} | Remaining: {}\nStatus: **{}** | Due {}",
                 loan.loan_id,
                 loan.direction,
                 loan.counterparty_display_name,
@@ -391,10 +425,7 @@ pub async fn repay_loan(
         ui::shares(receipt.paid_shares.unwrap_or(0.0))
     };
     let remaining = if receipt.asset_type == "money" {
-        ui::money(
-            ctx.data().config.as_ref(),
-            receipt.remaining_mana.unwrap_or(0),
-        )
+        ui::money(ctx.data().config.as_ref(), receipt.remaining_mana.unwrap_or(0))
     } else {
         ui::shares(receipt.remaining_shares.unwrap_or(0.0))
     };
@@ -424,6 +455,101 @@ async fn autocomplete_incoming_loan(
         .autocomplete_incoming_loans(&guild_id, &ctx.author().id.to_string(), partial, 20)
         .await
         .unwrap_or_default()
+}
+
+async fn handle_bot_money_loan_offer(
+    ctx: Context<'_>,
+    guild_id: &str,
+    receipt: crate::services::social_service::LoanOfferReceipt,
+    interest_bps: Option<i64>,
+    duration_seconds: Option<i64>,
+) -> Result<(), AppError> {
+    let bot_user = ctx.serenity_context().cache.current_user().clone();
+    let bot_name = bot_user
+        .global_name
+        .clone()
+        .unwrap_or_else(|| bot_user.name.clone());
+    let effective_interest_bps =
+        interest_bps.unwrap_or(ctx.data().config.loans.default_interest_bps);
+    let effective_duration_seconds =
+        duration_seconds.unwrap_or(ctx.data().config.loans.default_duration_seconds);
+
+    if !ctx.data().config.bot.auto_accept_loans {
+        let decline = ctx
+            .data()
+            .services
+            .social
+            .decline_loan(guild_id, receipt.loan_id, &bot_user.id.to_string())
+            .await?;
+        ui::send_embed(
+            ctx,
+            "🤖 Rat Declined Loan",
+            format!(
+                "**Loan:** **#{}**\n**Borrower:** **{}**\nProfit Rat is not accepting loans right now.\n**Status:** **{}**",
+                decline.loan_id, bot_name, decline.status
+            ),
+            poise::serenity_prelude::Colour::from_rgb(231, 76, 60),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    if effective_interest_bps > ctx.data().config.bot.max_loan_interest_bps
+        || effective_duration_seconds < ctx.data().config.bot.min_loan_duration_seconds
+    {
+        let decline = ctx
+            .data()
+            .services
+            .social
+            .decline_loan(guild_id, receipt.loan_id, &bot_user.id.to_string())
+            .await?;
+        ui::send_embed(
+            ctx,
+            "🤖 Rat Declined Loan",
+            format!(
+                "**Loan:** **#{}**\n**Borrower:** **{}**\nProfit Rat only accepts money loans up to **{} bps** and for at least **{} hour(s)**.\n**Your offer:** **{} bps** for **{:.2} hour(s)**\n**Status:** **{}**",
+                decline.loan_id,
+                bot_name,
+                ctx.data().config.bot.max_loan_interest_bps,
+                ctx.data().config.bot.min_loan_duration_seconds / 3600,
+                effective_interest_bps,
+                effective_duration_seconds as f64 / 3600.0,
+                decline.status,
+            ),
+            poise::serenity_prelude::Colour::from_rgb(231, 76, 60),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let accepted = ctx
+        .data()
+        .services
+        .social
+        .accept_loan(
+            guild_id,
+            receipt.loan_id,
+            &bot_user.id.to_string(),
+            &bot_name,
+        )
+        .await?;
+    ui::send_embed(
+        ctx,
+        "🤝 Rat Accepted Loan",
+        format!(
+            "**Loan:** **#{}**\n**Borrower:** **{}**\n**Principal:** {}\n**Repayment:** {}\n**Interest:** {} bps\n**Due:** {}\n**Status:** **{}**",
+            accepted.loan_id,
+            bot_name,
+            ui::money(ctx.data().config.as_ref(), receipt.principal_mana.unwrap_or(0)),
+            ui::money(ctx.data().config.as_ref(), receipt.repayment_mana.unwrap_or(0)),
+            receipt.interest_bps,
+            ui::discord_timestamp(accepted.due_at),
+            accepted.status,
+        ),
+        poise::serenity_prelude::Colour::from_rgb(46, 204, 113),
+    )
+    .await?;
+    Ok(())
 }
 
 fn require_guild(ctx: Context<'_>) -> Result<String, AppError> {

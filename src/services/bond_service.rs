@@ -103,6 +103,43 @@ pub struct BondPositionLine {
 }
 
 #[derive(Clone, Debug)]
+pub struct BondTransferOfferReceipt {
+    pub offer_id: i64,
+    pub issuance_id: i64,
+    pub title: String,
+    pub buyer_display_name: String,
+    pub quantity: i64,
+    pub price_mana: i64,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug)]
+pub struct IncomingBondOfferSummary {
+    pub offer_id: i64,
+    pub issuance_id: i64,
+    pub title: String,
+    pub seller_display_name: String,
+    pub quantity: i64,
+    pub price_mana: i64,
+    pub payout_per_bond_mana: i64,
+    pub matures_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug)]
+pub struct BondTransferOfferActionReceipt {
+    pub offer_id: i64,
+    pub issuance_id: i64,
+    pub title: String,
+    pub counterparty_display_name: String,
+    pub quantity: i64,
+    pub price_mana: i64,
+    pub status: String,
+    pub expires_at: DateTime<Utc>,
+    pub buyer_balance_mana: Option<i64>,
+}
+
+#[derive(Clone, Debug)]
 pub struct MaturedBondSummary {
     pub issuance_id: i64,
     pub guild_id: String,
@@ -450,6 +487,383 @@ impl BondService {
                 })
             })
             .collect()
+    }
+
+    #[instrument(skip(self), fields(guild_id, seller_user_id, buyer_user_id, issuance_id))]
+    pub async fn offer_bond_transfer(
+        &self,
+        guild_id: &str,
+        seller_user_id: &str,
+        seller_display_name: &str,
+        buyer_user_id: &str,
+        buyer_display_name: &str,
+        issuance_id: i64,
+        quantity: i64,
+        price_mana: i64,
+    ) -> AppResult<BondTransferOfferReceipt> {
+        if quantity <= 0 {
+            return Err(AppError::Validation(
+                "bond quantity must be positive".to_string(),
+            ));
+        }
+        if price_mana <= 0 {
+            return Err(AppError::Validation(
+                "bond offer price must be positive".to_string(),
+            ));
+        }
+        if seller_user_id == buyer_user_id {
+            return Err(AppError::Validation(
+                "you cannot offer bonds to yourself".to_string(),
+            ));
+        }
+        self.ensure_account(guild_id, seller_user_id, seller_display_name)
+            .await?;
+        self.ensure_account(guild_id, buyer_user_id, buyer_display_name)
+            .await?;
+        self.expire_pending_bond_transfer_offers().await?;
+
+        let mut tx = self.pool.begin().await?;
+        let issuance = self.load_open_issuance_tx(&mut tx, guild_id, issuance_id).await?;
+        let seller_position =
+            self.load_bond_position_tx(&mut tx, guild_id, issuance_id, seller_user_id)
+                .await?;
+        if seller_position.bonds_owned < quantity {
+            return Err(AppError::Conflict(format!(
+                "you only hold {} bond(s) in that issuance",
+                seller_position.bonds_owned
+            )));
+        }
+
+        let expires_at =
+            Utc::now() + chrono::Duration::seconds(self.config.share_offer_expiration_seconds.max(30));
+        let now = now_rfc3339();
+        let result = sqlx::query(
+            "INSERT INTO bond_transfer_offers
+             (guild_id, issuance_id, seller_discord_user_id, buyer_discord_user_id, quantity, price_mana, status, expires_at, created_at, responded_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7, ?8, NULL)",
+        )
+        .bind(guild_id)
+        .bind(issuance_id)
+        .bind(seller_user_id)
+        .bind(buyer_user_id)
+        .bind(quantity)
+        .bind(price_mana)
+        .bind(expires_at.to_rfc3339())
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+
+        Ok(BondTransferOfferReceipt {
+            offer_id: result.last_insert_rowid(),
+            issuance_id,
+            title: issuance.title,
+            buyer_display_name: buyer_display_name.to_string(),
+            quantity,
+            price_mana,
+            expires_at,
+        })
+    }
+
+    #[instrument(skip(self), fields(guild_id, buyer_user_id))]
+    pub async fn incoming_bond_transfer_offers(
+        &self,
+        guild_id: &str,
+        buyer_user_id: &str,
+    ) -> AppResult<Vec<IncomingBondOfferSummary>> {
+        self.expire_pending_bond_transfer_offers().await?;
+        let rows = sqlx::query(
+            "SELECT
+                o.id,
+                o.issuance_id,
+                o.quantity,
+                o.price_mana,
+                o.expires_at,
+                i.title,
+                i.payout_per_bond_mana,
+                i.matures_at,
+                ga.display_name AS seller_display_name,
+                o.seller_discord_user_id
+             FROM bond_transfer_offers o
+             JOIN bond_issuances i ON i.id = o.issuance_id
+             LEFT JOIN guild_accounts ga
+               ON ga.guild_id = o.guild_id
+              AND ga.discord_user_id = o.seller_discord_user_id
+             WHERE o.guild_id = ?1
+               AND o.buyer_discord_user_id = ?2
+               AND o.status = 'pending'
+             ORDER BY o.expires_at ASC, o.id ASC",
+        )
+        .bind(guild_id)
+        .bind(buyer_user_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                Ok(IncomingBondOfferSummary {
+                    offer_id: row.get("id"),
+                    issuance_id: row.get("issuance_id"),
+                    title: row.get("title"),
+                    seller_display_name: row
+                        .get::<Option<String>, _>("seller_display_name")
+                        .unwrap_or_else(|| row.get::<String, _>("seller_discord_user_id")),
+                    quantity: row.get("quantity"),
+                    price_mana: row.get("price_mana"),
+                    payout_per_bond_mana: row.get("payout_per_bond_mana"),
+                    matures_at: parse_rfc3339_utc(&row.get::<String, _>("matures_at"))?,
+                    expires_at: parse_rfc3339_utc(&row.get::<String, _>("expires_at"))?,
+                })
+            })
+            .collect()
+    }
+
+    #[instrument(skip(self))]
+    pub async fn autocomplete_incoming_bond_transfer_offers(
+        &self,
+        guild_id: &str,
+        buyer_user_id: &str,
+        partial: &str,
+        limit: i64,
+    ) -> AppResult<Vec<serenity::AutocompleteChoice>> {
+        let like = format!("%{}%", partial.trim());
+        let rows = sqlx::query(
+            "SELECT o.id, o.quantity, o.price_mana, i.title
+             FROM bond_transfer_offers o
+             JOIN bond_issuances i ON i.id = o.issuance_id
+             WHERE o.guild_id = ?1
+               AND o.buyer_discord_user_id = ?2
+               AND o.status = 'pending'
+               AND (?3 = '' OR i.title LIKE ?4 OR CAST(o.id AS TEXT) LIKE ?4)
+             ORDER BY o.expires_at ASC, o.id ASC
+             LIMIT ?5",
+        )
+        .bind(guild_id)
+        .bind(buyer_user_id)
+        .bind(partial.trim())
+        .bind(like)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                serenity::AutocompleteChoice::new(
+                    format!(
+                        "#{} [{} bond(s) | {}] {}",
+                        row.get::<i64, _>("id"),
+                        row.get::<i64, _>("quantity"),
+                        row.get::<i64, _>("price_mana"),
+                        row.get::<String, _>("title")
+                    ),
+                    row.get::<i64, _>("id").to_string(),
+                )
+            })
+            .collect())
+    }
+
+    #[instrument(skip(self), fields(guild_id, offer_id, buyer_user_id))]
+    pub async fn accept_bond_transfer_offer(
+        &self,
+        guild_id: &str,
+        offer_id: i64,
+        buyer_user_id: &str,
+        buyer_display_name: &str,
+    ) -> AppResult<BondTransferOfferActionReceipt> {
+        self.ensure_account(guild_id, buyer_user_id, buyer_display_name)
+            .await?;
+        self.expire_pending_bond_transfer_offers().await?;
+
+        let mut tx = self.pool.begin().await?;
+        let offer = self.load_pending_bond_transfer_offer_tx(&mut tx, guild_id, offer_id).await?;
+        if offer.buyer_discord_user_id != buyer_user_id {
+            return Err(AppError::Conflict(
+                "that bond offer is not addressed to you".to_string(),
+            ));
+        }
+        if Utc::now() >= parse_rfc3339_utc(&offer.expires_at)? {
+            return Err(AppError::Conflict(
+                "that bond offer already expired".to_string(),
+            ));
+        }
+        let issuance = self
+            .load_open_issuance_tx(&mut tx, guild_id, offer.issuance_id)
+            .await?;
+        let seller_position = self
+            .load_bond_position_tx(
+                &mut tx,
+                guild_id,
+                offer.issuance_id,
+                &offer.seller_discord_user_id,
+            )
+            .await?;
+        if seller_position.bonds_owned < offer.quantity {
+            return Err(AppError::Conflict(
+                "seller no longer holds enough bonds for that offer".to_string(),
+            ));
+        }
+        let buyer_balance = self.balance(guild_id, buyer_user_id).await?;
+        if buyer_balance < offer.price_mana {
+            return Err(AppError::Conflict(
+                "you do not have enough balance to accept that bond offer".to_string(),
+            ));
+        }
+
+        let seller_name = self.display_name(guild_id, &offer.seller_discord_user_id).await?;
+        let now = now_rfc3339();
+        self.adjust_balance(&mut tx, guild_id, buyer_user_id, -offer.price_mana)
+            .await?;
+        self.adjust_balance(
+            &mut tx,
+            guild_id,
+            &offer.seller_discord_user_id,
+            offer.price_mana,
+        )
+        .await?;
+        self.insert_money_event(
+            &mut tx,
+            guild_id,
+            buyer_user_id,
+            -offer.price_mana,
+            "bond_transfer_purchase",
+            Some(format!(
+                "accepted bond offer #{offer_id} for issuance #{}",
+                offer.issuance_id
+            )),
+        )
+        .await?;
+        self.insert_money_event(
+            &mut tx,
+            guild_id,
+            &offer.seller_discord_user_id,
+            offer.price_mana,
+            "bond_transfer_sale",
+            Some(format!(
+                "sold {} bond(s) from issuance #{}",
+                offer.quantity, offer.issuance_id
+            )),
+        )
+        .await?;
+
+        let transferred_cost_basis = prorated_cost_basis(
+            seller_position.total_spent_mana,
+            seller_position.bonds_owned,
+            offer.quantity,
+        );
+        sqlx::query(
+            "UPDATE bond_positions
+             SET bonds_owned = bonds_owned - ?3,
+                 total_spent_mana = CASE
+                     WHEN bonds_owned - ?3 <= 0 THEN 0
+                     ELSE MAX(total_spent_mana - ?4, 0)
+                 END,
+                 updated_at = ?5
+             WHERE issuance_id = ?1 AND guild_id = ?2 AND holder_discord_user_id = ?6",
+        )
+        .bind(offer.issuance_id)
+        .bind(guild_id)
+        .bind(offer.quantity)
+        .bind(transferred_cost_basis)
+        .bind(&now)
+        .bind(&offer.seller_discord_user_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO bond_positions
+             (issuance_id, guild_id, holder_discord_user_id, bonds_owned, total_spent_mana, total_redeemed_mana, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?6)
+             ON CONFLICT(issuance_id, holder_discord_user_id) DO UPDATE SET
+                bonds_owned = bonds_owned + excluded.bonds_owned,
+                total_spent_mana = total_spent_mana + excluded.total_spent_mana,
+                updated_at = excluded.updated_at",
+        )
+        .bind(offer.issuance_id)
+        .bind(guild_id)
+        .bind(buyer_user_id)
+        .bind(offer.quantity)
+        .bind(offer.price_mana)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE bond_transfer_offers
+             SET status = 'accepted', responded_at = ?2
+             WHERE id = ?1 AND status = 'pending'",
+        )
+        .bind(offer.id)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+
+        Ok(BondTransferOfferActionReceipt {
+            offer_id: offer.id,
+            issuance_id: issuance.id,
+            title: issuance.title,
+            counterparty_display_name: seller_name,
+            quantity: offer.quantity,
+            price_mana: offer.price_mana,
+            status: "accepted".to_string(),
+            expires_at: parse_rfc3339_utc(&offer.expires_at)?,
+            buyer_balance_mana: Some(self.balance(guild_id, buyer_user_id).await?),
+        })
+    }
+
+    #[instrument(skip(self), fields(guild_id, offer_id, buyer_user_id))]
+    pub async fn decline_bond_transfer_offer(
+        &self,
+        guild_id: &str,
+        offer_id: i64,
+        buyer_user_id: &str,
+    ) -> AppResult<BondTransferOfferActionReceipt> {
+        self.expire_pending_bond_transfer_offers().await?;
+        let mut tx = self.pool.begin().await?;
+        let offer = self.load_pending_bond_transfer_offer_tx(&mut tx, guild_id, offer_id).await?;
+        if offer.buyer_discord_user_id != buyer_user_id {
+            return Err(AppError::Conflict(
+                "that bond offer is not addressed to you".to_string(),
+            ));
+        }
+        let issuance = self
+            .load_any_issuance_tx(&mut tx, guild_id, offer.issuance_id)
+            .await?;
+        let seller_name = self.display_name(guild_id, &offer.seller_discord_user_id).await?;
+        sqlx::query(
+            "UPDATE bond_transfer_offers
+             SET status = 'declined', responded_at = ?2
+             WHERE id = ?1 AND status = 'pending'",
+        )
+        .bind(offer.id)
+        .bind(now_rfc3339())
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+
+        Ok(BondTransferOfferActionReceipt {
+            offer_id: offer.id,
+            issuance_id: issuance.id,
+            title: issuance.title,
+            counterparty_display_name: seller_name,
+            quantity: offer.quantity,
+            price_mana: offer.price_mana,
+            status: "declined".to_string(),
+            expires_at: parse_rfc3339_utc(&offer.expires_at)?,
+            buyer_balance_mana: None,
+        })
+    }
+
+    #[instrument(skip(self))]
+    pub async fn expire_pending_bond_transfer_offers(&self) -> AppResult<u64> {
+        let result = sqlx::query(
+            "UPDATE bond_transfer_offers
+             SET status = 'expired', responded_at = ?1
+             WHERE status = 'pending' AND expires_at <= ?1",
+        )
+        .bind(now_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
     }
 
     #[instrument(skip(self))]
@@ -1044,6 +1458,66 @@ impl BondService {
         .is_some())
     }
 
+    async fn load_bond_position_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        guild_id: &str,
+        issuance_id: i64,
+        holder_user_id: &str,
+    ) -> AppResult<BondPositionRow> {
+        sqlx::query_as::<_, BondPositionRow>(
+            "SELECT issuance_id, guild_id, holder_discord_user_id, bonds_owned, total_spent_mana, total_redeemed_mana
+             FROM bond_positions
+             WHERE issuance_id = ?1 AND guild_id = ?2 AND holder_discord_user_id = ?3",
+        )
+        .bind(issuance_id)
+        .bind(guild_id)
+        .bind(holder_user_id)
+        .fetch_optional(&mut **tx)
+        .await?
+        .ok_or_else(|| AppError::NotFound("bond position was not found".to_string()))
+    }
+
+    async fn load_pending_bond_transfer_offer_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        guild_id: &str,
+        offer_id: i64,
+    ) -> AppResult<BondTransferOfferRow> {
+        let offer = sqlx::query_as::<_, BondTransferOfferRow>(
+            "SELECT id, guild_id, issuance_id, seller_discord_user_id, buyer_discord_user_id, quantity, price_mana, status, expires_at
+             FROM bond_transfer_offers
+             WHERE guild_id = ?1 AND id = ?2",
+        )
+        .bind(guild_id)
+        .bind(offer_id)
+        .fetch_optional(&mut **tx)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("bond offer {offer_id} was not found")))?;
+        if offer.status != "pending" {
+            return Err(AppError::Conflict(format!(
+                "bond offer #{offer_id} is already {}",
+                offer.status
+            )));
+        }
+        Ok(offer)
+    }
+
+    async fn display_name(&self, guild_id: &str, user_id: &str) -> AppResult<String> {
+        let row = sqlx::query(
+            "SELECT display_name
+             FROM guild_accounts
+             WHERE guild_id = ?1 AND discord_user_id = ?2",
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row
+            .and_then(|row| row.get::<Option<String>, _>("display_name"))
+            .unwrap_or_else(|| user_id.to_string()))
+    }
+
     async fn evaluate_bot_bond_purchase(
         &self,
         guild_id: &str,
@@ -1151,6 +1625,29 @@ struct BondIssuanceRow {
     status: String,
 }
 
+#[derive(sqlx::FromRow)]
+struct BondPositionRow {
+    issuance_id: i64,
+    guild_id: String,
+    holder_discord_user_id: String,
+    bonds_owned: i64,
+    total_spent_mana: i64,
+    total_redeemed_mana: i64,
+}
+
+#[derive(sqlx::FromRow)]
+struct BondTransferOfferRow {
+    id: i64,
+    guild_id: String,
+    issuance_id: i64,
+    seller_discord_user_id: String,
+    buyer_discord_user_id: String,
+    quantity: i64,
+    price_mana: i64,
+    status: String,
+    expires_at: String,
+}
+
 struct BotBondEvaluation {
     approved_quantity: Option<i64>,
     reason: String,
@@ -1187,6 +1684,13 @@ fn parse_rfc3339_utc(value: &str) -> AppResult<DateTime<Utc>> {
     chrono::DateTime::parse_from_rfc3339(value)
         .map(|value| value.with_timezone(&Utc))
         .map_err(|_| AppError::Other(anyhow::anyhow!("invalid RFC3339 timestamp: {value}")))
+}
+
+fn prorated_cost_basis(total_spent_mana: i64, bonds_owned: i64, quantity: i64) -> i64 {
+    if bonds_owned <= 0 || quantity <= 0 || total_spent_mana <= 0 {
+        return 0;
+    }
+    ((total_spent_mana as f64) * (quantity as f64 / bonds_owned as f64)).round() as i64
 }
 
 #[cfg(test)]
@@ -1395,5 +1899,70 @@ mod tests {
         assert!(!outcome.accepted);
         assert_eq!(outcome.quantity, 0);
         assert!(outcome.reason.contains("above the bot limit"));
+    }
+
+    #[tokio::test]
+    async fn bond_transfer_offer_can_be_accepted_by_another_user() {
+        let temp = tempdir().expect("tempdir");
+        let cache_dir = temp.path().join(".cache");
+        let config = Arc::new(test_config(cache_dir.clone()));
+        config.ensure_runtime_dirs().expect("dirs");
+        let pool = db::connect(&config).await.expect("pool");
+        let service = super::BondService::new(config, pool);
+
+        let receipt = service
+            .create_bond(CreateBondRequest {
+                guild_id: "guild-a".to_string(),
+                issuer_user_id: "seller".to_string(),
+                issuer_display_name: "Seller".to_string(),
+                title: "Resellable Note".to_string(),
+                description: None,
+                price_per_bond_mana: 1_000,
+                total_bonds: 3,
+                yield_bps: 400,
+                yield_period_seconds: Some(3_600),
+                matures_at: Utc::now() + Duration::hours(2),
+            })
+            .await
+            .expect("create bond");
+
+        service
+            .buy_bond("guild-a", "buyer-0", "Initial Buyer", receipt.issuance_id, 2)
+            .await
+            .expect("initial buy");
+
+        let offer = service
+            .offer_bond_transfer(
+                "guild-a",
+                "buyer-0",
+                "Initial Buyer",
+                "buyer-1",
+                "Second Buyer",
+                receipt.issuance_id,
+                1,
+                1_150,
+            )
+            .await
+            .expect("offer bond");
+
+        let accepted = service
+            .accept_bond_transfer_offer(
+                "guild-a",
+                offer.offer_id,
+                "buyer-1",
+                "Second Buyer",
+            )
+            .await
+            .expect("accept offer");
+
+        assert_eq!(accepted.status, "accepted");
+        assert_eq!(accepted.quantity, 1);
+
+        let positions = service
+            .positions_for_holder("guild-a", "buyer-1")
+            .await
+            .expect("positions");
+        assert_eq!(positions.len(), 1);
+        assert_eq!(positions[0].bonds_owned, 1);
     }
 }

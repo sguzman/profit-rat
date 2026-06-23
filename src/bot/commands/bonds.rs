@@ -162,6 +162,55 @@ pub async fn buy_bond(
 }
 
 #[poise::command(slash_command)]
+pub async fn offer_bond(
+    ctx: Context<'_>,
+    #[description = "Buyer"] user: serenity::User,
+    #[description = "Bond issuance you already hold"]
+    #[autocomplete = "autocomplete_open_bond"]
+    bond: String,
+    #[description = "How many bonds to sell"] quantity: i64,
+    #[description = "Total asking price"] price: i64,
+) -> Result<(), AppError> {
+    let guild_id = ctx.guild_id().ok_or_else(|| {
+        AppError::Validation("bonds only exist inside a server economy".to_string())
+    })?;
+    let issuance_id = parse_bond_id(&bond)?;
+    let receipt = ctx
+        .data()
+        .services
+        .bonds
+        .offer_bond_transfer(
+            &guild_id.to_string(),
+            &ctx.author().id.to_string(),
+            &display_name(ctx.author()),
+            &user.id.to_string(),
+            &display_name(&user),
+            issuance_id,
+            quantity,
+            price,
+        )
+        .await?;
+
+    ui::send_embed(
+        ctx,
+        "📨 Bond Offer Sent",
+        format!(
+            "**Offer:** **#{}**\n**Bond:** **#{}** {}\n**Buyer:** **{}**\n**Quantity:** **{}**\n**Asking price:** {}\n**Expires:** {}",
+            receipt.offer_id,
+            receipt.issuance_id,
+            receipt.title,
+            receipt.buyer_display_name,
+            receipt.quantity,
+            ui::money(ctx.data().config.as_ref(), receipt.price_mana),
+            ui::discord_timestamp(receipt.expires_at),
+        ),
+        serenity::Colour::from_rgb(230, 126, 34),
+    )
+    .await?;
+    Ok(())
+}
+
+#[poise::command(slash_command)]
 pub async fn sell_bond(
     ctx: Context<'_>,
     #[description = "Bond issuance to pitch to Profit Rat"]
@@ -229,6 +278,140 @@ pub async fn sell_bond(
 }
 
 #[poise::command(slash_command)]
+pub async fn incoming_bond_offers(ctx: Context<'_>) -> Result<(), AppError> {
+    let guild_id = ctx.guild_id().ok_or_else(|| {
+        AppError::Validation("bonds only exist inside a server economy".to_string())
+    })?;
+    let offers = ctx
+        .data()
+        .services
+        .bonds
+        .incoming_bond_transfer_offers(&guild_id.to_string(), &ctx.author().id.to_string())
+        .await?;
+    if offers.is_empty() {
+        ui::send_embed(
+            ctx,
+            "📨 Incoming Bond Offers",
+            "No bond offers are waiting on you right now.",
+            serenity::Colour::from_rgb(127, 140, 141),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let body = offers
+        .into_iter()
+        .map(|offer| {
+            format!(
+                "**#{}** from **{}**\nBond **#{}** {} • Quantity **{}**\nAsk {} • Payout/bond {} • Matures {}\nExpires {}",
+                offer.offer_id,
+                offer.seller_display_name,
+                offer.issuance_id,
+                offer.title,
+                offer.quantity,
+                ui::money(ctx.data().config.as_ref(), offer.price_mana),
+                ui::money(ctx.data().config.as_ref(), offer.payout_per_bond_mana),
+                ui::discord_timestamp(offer.matures_at),
+                ui::discord_timestamp(offer.expires_at),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    ui::send_embed(
+        ctx,
+        "📨 Incoming Bond Offers",
+        body,
+        serenity::Colour::from_rgb(52, 152, 219),
+    )
+    .await?;
+    Ok(())
+}
+
+#[poise::command(slash_command)]
+pub async fn accept_bond_offer(
+    ctx: Context<'_>,
+    #[description = "Incoming bond offer"]
+    #[autocomplete = "autocomplete_incoming_bond_offer"]
+    offer: String,
+) -> Result<(), AppError> {
+    let guild_id = ctx.guild_id().ok_or_else(|| {
+        AppError::Validation("bonds only exist inside a server economy".to_string())
+    })?;
+    let offer_id = parse_bond_id(&offer)?;
+    let receipt = ctx
+        .data()
+        .services
+        .bonds
+        .accept_bond_transfer_offer(
+            &guild_id.to_string(),
+            offer_id,
+            &ctx.author().id.to_string(),
+            &display_name(ctx.author()),
+        )
+        .await?;
+
+    ui::send_embed(
+        ctx,
+        "✅ Bond Offer Accepted",
+        format!(
+            "**Offer:** **#{}**\n**Bond:** **#{}** {}\n**Seller:** **{}**\n**Quantity:** **{}**\n**Paid:** {}\n**Balance now:** {}",
+            receipt.offer_id,
+            receipt.issuance_id,
+            receipt.title,
+            receipt.counterparty_display_name,
+            receipt.quantity,
+            ui::money(ctx.data().config.as_ref(), receipt.price_mana),
+            ui::money(
+                ctx.data().config.as_ref(),
+                receipt.buyer_balance_mana.unwrap_or(0)
+            ),
+        ),
+        serenity::Colour::from_rgb(46, 204, 113),
+    )
+    .await?;
+    Ok(())
+}
+
+#[poise::command(slash_command)]
+pub async fn decline_bond_offer(
+    ctx: Context<'_>,
+    #[description = "Incoming bond offer"]
+    #[autocomplete = "autocomplete_incoming_bond_offer"]
+    offer: String,
+) -> Result<(), AppError> {
+    let guild_id = ctx.guild_id().ok_or_else(|| {
+        AppError::Validation("bonds only exist inside a server economy".to_string())
+    })?;
+    let offer_id = parse_bond_id(&offer)?;
+    let receipt = ctx
+        .data()
+        .services
+        .bonds
+        .decline_bond_transfer_offer(
+            &guild_id.to_string(),
+            offer_id,
+            &ctx.author().id.to_string(),
+        )
+        .await?;
+
+    ui::send_embed(
+        ctx,
+        "🚫 Bond Offer Declined",
+        format!(
+            "**Offer:** **#{}**\n**Bond:** **#{}** {}\n**Seller:** **{}**\n**Status:** **{}**",
+            receipt.offer_id,
+            receipt.issuance_id,
+            receipt.title,
+            receipt.counterparty_display_name,
+            receipt.status,
+        ),
+        serenity::Colour::from_rgb(231, 76, 60),
+    )
+    .await?;
+    Ok(())
+}
+
+#[poise::command(slash_command)]
 pub async fn my_bonds(ctx: Context<'_>) -> Result<(), AppError> {
     let guild_id = ctx.guild_id().ok_or_else(|| {
         AppError::Validation("bonds only exist inside a server economy".to_string())
@@ -290,6 +473,26 @@ async fn autocomplete_open_bond(
         .services
         .bonds
         .autocomplete_open_bonds(&guild_id.to_string(), partial, 20)
+        .await
+        .unwrap_or_default()
+}
+
+async fn autocomplete_incoming_bond_offer(
+    ctx: Context<'_>,
+    partial: &str,
+) -> Vec<serenity::AutocompleteChoice> {
+    let Some(guild_id) = ctx.guild_id() else {
+        return Vec::new();
+    };
+    ctx.data()
+        .services
+        .bonds
+        .autocomplete_incoming_bond_transfer_offers(
+            &guild_id.to_string(),
+            &ctx.author().id.to_string(),
+            partial,
+            20,
+        )
         .await
         .unwrap_or_default()
 }

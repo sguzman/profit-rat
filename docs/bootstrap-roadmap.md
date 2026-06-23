@@ -4,6 +4,7 @@
 - Rule: check a box only when code, tests, and docs for that item are done.
 - Progress: bootstrap foundation, native markets, Manifold tracking, and richer Discord UX are implemented and verified.
 - Progress: guild-scoped isolation, TOML-first currency policy, direct donations, and share/money loan flows were implemented and re-verified on 2026-06-22.
+- Progress: bot-targeted loan offers now resolve immediately, and bonds support person-to-person secondary offers in addition to rat buybacks.
 - Validation: `cargo check` and `cargo test` both pass locally as of 2026-06-22 after the multi-guild and social-economy pass.
 
 ## Milestones

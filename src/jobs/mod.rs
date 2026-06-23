@@ -57,6 +57,15 @@ pub fn spawn_background_jobs(
                     error!(%error, "share offer expiry worker failed");
                 }
             }
+            match cleanup_services.bonds.expire_pending_bond_transfer_offers().await {
+                Ok(expired) if expired > 0 => {
+                    info!(expired, "expired pending bond offers");
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    error!(%error, "bond offer expiry worker failed");
+                }
+            }
         }
     });
 

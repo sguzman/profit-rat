@@ -107,6 +107,10 @@ The default faucet is now a `twice-daily login` claim paying `10,000` each perio
 - `/list_bonds`
 - `/buy_bond`
 - `/sell_bond`
+- `/offer_bond`
+- `/incoming_bond_offers`
+- `/accept_bond_offer`
+- `/decline_bond_offer`
 - `/my_bonds`
 
 ### Manifold Mirrors
@@ -142,7 +146,14 @@ The default faucet is now a `twice-daily login` claim paying `10,000` each perio
 - Bond issuers pre-fund maturity escrow up front
 - `/buy_bond` lets a user buy an open issuance directly
 - `/sell_bond` asks Profit Rat to buy the bond immediately if it passes the bot's TOML-configured price, yield, maturity, and exposure rules
+- `/offer_bond` lets a holder sell already-owned bonds directly to another user with accept/decline flow
 - The bot will refuse bonds that fall outside its configured guardrails
+
+## Bot Loans
+
+- If you target `@profit-rat` with `/offer_loan_money`, the bot now responds immediately
+- It accepts only money loans with interest at or below the configured cap and duration at or above the configured minimum
+- It declines share loans to the bot immediately
 
 ## Guild Isolation
 
