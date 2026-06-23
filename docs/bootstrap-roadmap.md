@@ -31,5 +31,6 @@
 - [x] Add guild-scoped `/offer_loan_money`, `/offer_loan_shares`, `/incoming_loans`, `/accept_loan`, `/decline_loan`, `/loan_status`, and `/repay_loan`.
 - [x] Add background maintenance for share-offer expiry, pending-loan expiry, and overdue-loan defaulting.
 - [x] Sync slash commands immediately per guild on restart and announce command catalog/version changes from a `.cache` startup manifest.
+- [x] Add configurable bot auto-claim and selective bot loan acceptance behavior, market-depth histograms, and a first-pass pre-funded bond issuance system.
 - [ ] Generalize existing peer offers onto `asset_offers` and expose `/offer_money`, `/incoming_offers`, `/accept_offer`, and `/decline_offer`.
 - [ ] Add end-to-end tests for donations, loans, and guild-isolation behavior across multiple guilds.

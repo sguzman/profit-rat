@@ -1100,6 +1100,57 @@ impl SocialService {
         Ok(result.rows_affected())
     }
 
+    #[instrument(skip(self), fields(guild_id, borrower_user_id))]
+    pub async fn auto_accept_eligible_loans(
+        &self,
+        guild_id: &str,
+        borrower_user_id: &str,
+        borrower_display_name: &str,
+        required_interest_bps: i64,
+        min_duration_seconds: i64,
+    ) -> AppResult<u64> {
+        self.expire_pending_loans().await?;
+        let rows = sqlx::query(
+            "SELECT id, asset_type, interest_bps, created_at, due_at
+             FROM loans
+             WHERE guild_id = ?1
+               AND borrower_discord_user_id = ?2
+               AND status = 'pending'
+             ORDER BY created_at ASC, id ASC",
+        )
+        .bind(guild_id)
+        .bind(borrower_user_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut accepted = 0;
+        for row in rows {
+            let loan_id = row.get::<i64, _>("id");
+            let asset_type = row.get::<String, _>("asset_type");
+            let interest_bps = row.get::<i64, _>("interest_bps");
+            let created_at = parse_rfc3339_utc(&row.get::<String, _>("created_at"))?;
+            let due_at = parse_rfc3339_utc(&row.get::<String, _>("due_at"))?;
+            let duration_seconds = (due_at - created_at).num_seconds();
+
+            if asset_type != "money"
+                || interest_bps != required_interest_bps
+                || duration_seconds < min_duration_seconds
+            {
+                continue;
+            }
+
+            if self
+                .accept_loan(guild_id, loan_id, borrower_user_id, borrower_display_name)
+                .await
+                .is_ok()
+            {
+                accepted += 1;
+            }
+        }
+
+        Ok(accepted)
+    }
+
     async fn ensure_loan_parties(
         &self,
         guild_id: &str,

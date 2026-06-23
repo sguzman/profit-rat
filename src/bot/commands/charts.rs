@@ -5,6 +5,7 @@ use tracing::info;
 
 use crate::bot::charts;
 use crate::bot::commands::market::{autocomplete_any_market, parse_market_id};
+use crate::bot::ui;
 use crate::bot::{Context, display_name};
 use crate::error::{AppError, AppResult};
 
@@ -216,6 +217,89 @@ pub async fn histogram_time(
         format!(
             "{}\nShows how each option's implied price has moved over time.",
             history.question
+        ),
+    )
+    .await
+}
+
+#[poise::command(slash_command)]
+pub async fn histogram_book(
+    ctx: Context<'_>,
+    #[description = "Pick a native market"]
+    #[autocomplete = "autocomplete_any_market"]
+    market: String,
+    #[description = "buy, sell, or both"] side: Option<String>,
+) -> Result<(), AppError> {
+    let guild_id = require_guild(ctx)?;
+    let market_id = parse_market_id(&market)?;
+    let book = ctx
+        .data()
+        .services
+        .trading
+        .market_book(&guild_id.to_string(), market_id)
+        .await?;
+
+    let side = side.unwrap_or_else(|| "both".to_string()).to_ascii_lowercase();
+    let mut levels = HashMap::<String, (f64, String)>::new();
+
+    if side == "buy" || side == "both" {
+        for order in &book.buys {
+            let key = format!("B {} @ {}", order.option_label, ui::percent(order.trigger_price));
+            let detail = format!("Buy {} at {}", order.option_label, ui::percent(order.trigger_price));
+            let entry = levels.entry(key).or_insert((0.0, detail));
+            entry.0 += order.quantity_shares;
+        }
+    }
+    if side == "sell" || side == "both" {
+        for order in &book.sells {
+            let key = format!("S {} @ {}", order.option_label, ui::percent(order.trigger_price));
+            let detail = format!("Sell {} at {}", order.option_label, ui::percent(order.trigger_price));
+            let entry = levels.entry(key).or_insert((0.0, detail));
+            entry.0 += order.quantity_shares;
+        }
+    }
+    if levels.is_empty() {
+        return Err(AppError::Validation(
+            "that market book does not have any open depth on the requested side".to_string(),
+        ));
+    }
+
+    let mut bars = levels
+        .into_iter()
+        .map(|(label, (value, detail))| (label, value, detail))
+        .collect::<Vec<_>>();
+    bars.sort_by(|left, right| right.1.total_cmp(&left.1));
+    bars.truncate(20);
+
+    let artifact = charts::render_market_depth_histogram(
+        ctx.data().config.as_ref(),
+        market_id,
+        &book.market_question,
+        match side.as_str() {
+            "buy" => "buy",
+            "sell" => "sell",
+            _ => "combined",
+        },
+        &bars,
+    )?;
+    info!(
+        market_id,
+        side,
+        filename = %artifact.filename,
+        "rendered market depth histogram"
+    );
+    send_chart(
+        ctx,
+        artifact,
+        format!("📚 Depth Histogram · #{}", market_id),
+        format!(
+            "{}\nShows aggregated open limit-order depth for the {} side of the book.",
+            book.market_question,
+            match side.as_str() {
+                "buy" => "buy",
+                "sell" => "sell",
+                _ => "combined",
+            }
         ),
     )
     .await

@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use chrono::Utc;
 use poise::serenity_prelude as serenity;
@@ -10,6 +11,7 @@ use tracing::{info, instrument, warn};
 use crate::bot;
 use crate::config::AppConfig;
 use crate::error::AppResult;
+use crate::jobs;
 use crate::services::Services;
 
 const COMMAND_MANIFEST_FILE: &str = "command-manifest.json";
@@ -41,6 +43,13 @@ pub async fn sync_commands_and_announce(
     services: &Services,
 ) -> AppResult<()> {
     let guild_ids: Vec<serenity::GuildId> = ready.guilds.iter().map(|guild| guild.id).collect();
+    jobs::spawn_bot_behavior_jobs(
+        Arc::new(config.clone()),
+        services.clone(),
+        ready.user.id.to_string(),
+        ready.user.global_name.clone().unwrap_or_else(|| ready.user.name.clone()),
+        guild_ids.iter().map(ToString::to_string).collect(),
+    );
 
     for guild_id in &guild_ids {
         poise::builtins::register_in_guild(ctx, commands, *guild_id).await?;
@@ -252,8 +261,8 @@ async fn announce_command_changes(
 mod tests {
     use super::{CommandManifest, load_and_store_manifest};
     use crate::config::{
-        AppConfig, CurrencyConfig, CurrencyPosition, LoanPolicyConfig, ManifoldConfig,
-        NegativeStyle, PolicyConfig, TransferPolicyConfig,
+        AppConfig, BondPolicyConfig, BotPolicyConfig, CurrencyConfig, CurrencyPosition,
+        LoanPolicyConfig, ManifoldConfig, NegativeStyle, PolicyConfig, TransferPolicyConfig,
     };
     use std::sync::Arc;
 
@@ -296,6 +305,22 @@ mod tests {
                 default_duration_seconds: 86_400,
                 max_duration_seconds: 2_592_000,
                 max_open_loans_per_user: 10,
+            },
+            bot: BotPolicyConfig {
+                auto_claim: true,
+                auto_accept_loans: true,
+                loan_required_interest_bps: 500,
+                min_loan_duration_seconds: 3_600,
+                worker_interval_seconds: 60,
+            },
+            bonds: BondPolicyConfig {
+                enabled: true,
+                default_yield_period_seconds: 3_600,
+                max_yield_bps: 5_000,
+                min_maturity_seconds: 3_600,
+                max_maturity_seconds: 7_776_000,
+                max_open_issuances_per_user: 10,
+                worker_interval_seconds: 60,
             },
             manifold: ManifoldConfig {
                 api_base_url: "https://api.manifold.markets/v0".to_string(),

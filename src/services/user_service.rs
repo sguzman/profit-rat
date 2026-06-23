@@ -204,8 +204,8 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::config::{
-        AppConfig, CurrencyConfig, CurrencyPosition, LoanPolicyConfig, ManifoldConfig,
-        NegativeStyle, PolicyConfig, TransferPolicyConfig,
+        AppConfig, BondPolicyConfig, BotPolicyConfig, CurrencyConfig, CurrencyPosition,
+        LoanPolicyConfig, ManifoldConfig, NegativeStyle, PolicyConfig, TransferPolicyConfig,
     };
     use crate::db;
 
@@ -261,6 +261,22 @@ mod tests {
                 default_duration_seconds: 86_400,
                 max_duration_seconds: 2_592_000,
                 max_open_loans_per_user: 10,
+            },
+            bot: BotPolicyConfig {
+                auto_claim: true,
+                auto_accept_loans: true,
+                loan_required_interest_bps: 500,
+                min_loan_duration_seconds: 3_600,
+                worker_interval_seconds: 60,
+            },
+            bonds: BondPolicyConfig {
+                enabled: true,
+                default_yield_period_seconds: 3_600,
+                max_yield_bps: 5_000,
+                min_maturity_seconds: 3_600,
+                max_maturity_seconds: 7_776_000,
+                max_open_issuances_per_user: 10,
+                worker_interval_seconds: 60,
             },
             manifold: ManifoldConfig {
                 api_base_url: "https://api.manifold.markets/v0".to_string(),

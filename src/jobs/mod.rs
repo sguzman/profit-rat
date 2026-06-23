@@ -90,6 +90,113 @@ pub fn spawn_background_jobs(
     });
 }
 
+pub fn spawn_bot_behavior_jobs(
+    config: Arc<AppConfig>,
+    services: Services,
+    bot_user_id: String,
+    bot_display_name: String,
+    guild_ids: Vec<String>,
+) {
+    let behavior_every = Duration::from_secs(config.bot.worker_interval_seconds.max(15) as u64);
+    let behavior_config = config.clone();
+    let behavior_services = services.clone();
+    let behavior_bot_user_id = bot_user_id.clone();
+    let behavior_bot_display_name = bot_display_name.clone();
+    let behavior_guild_ids = guild_ids.clone();
+    tokio::spawn(async move {
+        info!(
+            worker_seconds = behavior_every.as_secs(),
+            guilds = behavior_guild_ids.len(),
+            bot_user_id = behavior_bot_user_id,
+            "starting rat behavior worker"
+        );
+
+        let mut interval = tokio::time::interval(behavior_every);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        loop {
+            interval.tick().await;
+            for guild_id in &behavior_guild_ids {
+                if behavior_config.bot.auto_claim {
+                    match behavior_services
+                        .users
+                        .claim(
+                            guild_id,
+                            &behavior_bot_user_id,
+                            &behavior_bot_display_name,
+                        )
+                        .await
+                    {
+                        Ok(receipt) => info!(
+                            guild_id,
+                            amount = receipt.amount_mana,
+                            balance = receipt.balance_mana,
+                            "bot auto-claimed its periodic payout"
+                        ),
+                        Err(crate::error::AppError::Conflict(_)) => {}
+                        Err(error) => error!(guild_id, %error, "bot auto-claim failed"),
+                    }
+                }
+
+                if behavior_config.bot.auto_accept_loans {
+                    match behavior_services
+                        .social
+                        .auto_accept_eligible_loans(
+                            guild_id,
+                            &behavior_bot_user_id,
+                            &behavior_bot_display_name,
+                            behavior_config.bot.loan_required_interest_bps,
+                            behavior_config.bot.min_loan_duration_seconds,
+                        )
+                        .await
+                    {
+                        Ok(accepted) if accepted > 0 => info!(
+                            guild_id,
+                            accepted,
+                            required_interest_bps = behavior_config.bot.loan_required_interest_bps,
+                            min_duration_seconds = behavior_config.bot.min_loan_duration_seconds,
+                            "bot auto-accepted eligible loans"
+                        ),
+                        Ok(_) => {}
+                        Err(error) => error!(guild_id, %error, "bot auto-loan acceptance failed"),
+                    }
+                }
+            }
+        }
+    });
+
+    let bond_every = Duration::from_secs(config.bonds.worker_interval_seconds.max(30) as u64);
+    tokio::spawn(async move {
+        info!(
+            worker_seconds = bond_every.as_secs(),
+            "starting bond maturity worker"
+        );
+
+        let mut interval = tokio::time::interval(bond_every);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        loop {
+            interval.tick().await;
+            match services.bonds.mature_due_bonds().await {
+                Ok(matured) => {
+                    for issuance in matured {
+                        info!(
+                            issuance_id = issuance.issuance_id,
+                            guild_id = issuance.guild_id,
+                            title = issuance.title,
+                            holders_paid = issuance.holders_paid,
+                            total_paid = issuance.total_paid_mana,
+                            issuer_refund = issuance.issuer_refund_mana,
+                            "bond issuance matured"
+                        );
+                    }
+                }
+                Err(error) => error!(%error, "bond maturity worker failed"),
+            }
+        }
+    });
+}
+
 #[instrument(skip(config, services, http))]
 async fn poll_and_announce(
     config: &AppConfig,

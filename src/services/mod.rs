@@ -1,3 +1,4 @@
+pub mod bond_service;
 pub mod leaderboard_service;
 pub mod market_service;
 pub mod social_service;
@@ -13,6 +14,7 @@ use crate::integrations::manifold::ManifoldClient;
 #[derive(Clone)]
 pub struct Services {
     pub users: user_service::UserService,
+    pub bonds: bond_service::BondService,
     pub markets: market_service::MarketService,
     pub trading: trading_service::TradingService,
     pub social: social_service::SocialService,
@@ -22,6 +24,7 @@ pub struct Services {
 impl Services {
     pub fn new(config: Arc<AppConfig>, pool: DbPool, manifold: Arc<ManifoldClient>) -> Self {
         let users = user_service::UserService::new(config.clone(), pool.clone());
+        let bonds = bond_service::BondService::new(config.clone(), pool.clone());
         let markets =
             market_service::MarketService::new(config.clone(), pool.clone(), manifold.clone());
         let trading = trading_service::TradingService::new(config.clone(), pool.clone(), manifold);
@@ -30,6 +33,7 @@ impl Services {
 
         Self {
             users,
+            bonds,
             markets,
             trading,
             social,

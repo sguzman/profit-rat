@@ -19,6 +19,8 @@ pub struct AppConfig {
     pub policies: PolicyConfig,
     pub transfers: TransferPolicyConfig,
     pub loans: LoanPolicyConfig,
+    pub bot: BotPolicyConfig,
+    pub bonds: BondPolicyConfig,
     pub manifold: ManifoldConfig,
     pub currency: CurrencyConfig,
     pub starting_balance: i64,
@@ -67,6 +69,26 @@ pub struct LoanPolicyConfig {
     pub default_duration_seconds: i64,
     pub max_duration_seconds: i64,
     pub max_open_loans_per_user: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct BotPolicyConfig {
+    pub auto_claim: bool,
+    pub auto_accept_loans: bool,
+    pub loan_required_interest_bps: i64,
+    pub min_loan_duration_seconds: i64,
+    pub worker_interval_seconds: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct BondPolicyConfig {
+    pub enabled: bool,
+    pub default_yield_period_seconds: i64,
+    pub max_yield_bps: i64,
+    pub min_maturity_seconds: i64,
+    pub max_maturity_seconds: i64,
+    pub max_open_issuances_per_user: i64,
+    pub worker_interval_seconds: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -208,6 +230,27 @@ impl AppConfig {
             max_open_loans_per_user: merged.loans.max_open_loans_per_user.unwrap_or(10),
         };
 
+        let bot = BotPolicyConfig {
+            auto_claim: merged.bot.auto_claim.unwrap_or(true),
+            auto_accept_loans: merged.bot.auto_accept_loans.unwrap_or(true),
+            loan_required_interest_bps: merged.bot.loan_required_interest_bps.unwrap_or(500),
+            min_loan_duration_seconds: merged.bot.min_loan_duration_seconds.unwrap_or(3_600),
+            worker_interval_seconds: merged.bot.worker_interval_seconds.unwrap_or(60),
+        };
+
+        let bonds = BondPolicyConfig {
+            enabled: merged.bonds.enabled.unwrap_or(true),
+            default_yield_period_seconds: merged
+                .bonds
+                .default_yield_period_seconds
+                .unwrap_or(3_600),
+            max_yield_bps: merged.bonds.max_yield_bps.unwrap_or(5_000),
+            min_maturity_seconds: merged.bonds.min_maturity_seconds.unwrap_or(3_600),
+            max_maturity_seconds: merged.bonds.max_maturity_seconds.unwrap_or(7_776_000),
+            max_open_issuances_per_user: merged.bonds.max_open_issuances_per_user.unwrap_or(10),
+            worker_interval_seconds: merged.bonds.worker_interval_seconds.unwrap_or(60),
+        };
+
         let manifold = ManifoldConfig {
             api_base_url: merged
                 .manifold
@@ -267,6 +310,8 @@ impl AppConfig {
             policies: policy.clone(),
             transfers,
             loans,
+            bot,
+            bonds,
             manifold: manifold.clone(),
             currency,
             starting_balance: policy.starting_balance,
@@ -361,6 +406,10 @@ struct PartialConfig {
     #[serde(default)]
     loans: PartialLoanPolicyConfig,
     #[serde(default)]
+    bot: PartialBotPolicyConfig,
+    #[serde(default)]
+    bonds: PartialBondPolicyConfig,
+    #[serde(default)]
     manifold: PartialManifoldConfig,
     #[serde(default)]
     currency: PartialCurrencyConfig,
@@ -375,6 +424,8 @@ impl PartialConfig {
             policies: self.policies.merge(overlay.policies),
             transfers: self.transfers.merge(overlay.transfers),
             loans: self.loans.merge(overlay.loans),
+            bot: self.bot.merge(overlay.bot),
+            bonds: self.bonds.merge(overlay.bonds),
             manifold: self.manifold.merge(overlay.manifold),
             currency: self.currency.merge(overlay.currency),
         }
@@ -527,6 +578,76 @@ impl PartialManifoldConfig {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+struct PartialBotPolicyConfig {
+    #[serde(default)]
+    auto_claim: Option<bool>,
+    #[serde(default)]
+    auto_accept_loans: Option<bool>,
+    #[serde(default)]
+    loan_required_interest_bps: Option<i64>,
+    #[serde(default)]
+    min_loan_duration_seconds: Option<i64>,
+    #[serde(default)]
+    worker_interval_seconds: Option<i64>,
+}
+
+impl PartialBotPolicyConfig {
+    fn merge(self, overlay: Self) -> Self {
+        Self {
+            auto_claim: overlay.auto_claim.or(self.auto_claim),
+            auto_accept_loans: overlay.auto_accept_loans.or(self.auto_accept_loans),
+            loan_required_interest_bps: overlay
+                .loan_required_interest_bps
+                .or(self.loan_required_interest_bps),
+            min_loan_duration_seconds: overlay
+                .min_loan_duration_seconds
+                .or(self.min_loan_duration_seconds),
+            worker_interval_seconds: overlay
+                .worker_interval_seconds
+                .or(self.worker_interval_seconds),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct PartialBondPolicyConfig {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    default_yield_period_seconds: Option<i64>,
+    #[serde(default)]
+    max_yield_bps: Option<i64>,
+    #[serde(default)]
+    min_maturity_seconds: Option<i64>,
+    #[serde(default)]
+    max_maturity_seconds: Option<i64>,
+    #[serde(default)]
+    max_open_issuances_per_user: Option<i64>,
+    #[serde(default)]
+    worker_interval_seconds: Option<i64>,
+}
+
+impl PartialBondPolicyConfig {
+    fn merge(self, overlay: Self) -> Self {
+        Self {
+            enabled: overlay.enabled.or(self.enabled),
+            default_yield_period_seconds: overlay
+                .default_yield_period_seconds
+                .or(self.default_yield_period_seconds),
+            max_yield_bps: overlay.max_yield_bps.or(self.max_yield_bps),
+            min_maturity_seconds: overlay.min_maturity_seconds.or(self.min_maturity_seconds),
+            max_maturity_seconds: overlay.max_maturity_seconds.or(self.max_maturity_seconds),
+            max_open_issuances_per_user: overlay
+                .max_open_issuances_per_user
+                .or(self.max_open_issuances_per_user),
+            worker_interval_seconds: overlay
+                .worker_interval_seconds
+                .or(self.worker_interval_seconds),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
 struct PartialCurrencyConfig {
     #[serde(default)]
     code: Option<String>,
@@ -609,8 +730,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        AppConfig, CurrencyConfig, CurrencyPosition, LoanPolicyConfig, ManifoldConfig,
-        NegativeStyle, PolicyConfig, TransferPolicyConfig,
+        AppConfig, BondPolicyConfig, BotPolicyConfig, CurrencyConfig, CurrencyPosition,
+        LoanPolicyConfig, ManifoldConfig, NegativeStyle, PolicyConfig, TransferPolicyConfig,
     };
 
     #[test]
@@ -666,6 +787,22 @@ mod tests {
                 default_duration_seconds: 86_400,
                 max_duration_seconds: 2_592_000,
                 max_open_loans_per_user: 10,
+            },
+            bot: BotPolicyConfig {
+                auto_claim: true,
+                auto_accept_loans: true,
+                loan_required_interest_bps: 500,
+                min_loan_duration_seconds: 3_600,
+                worker_interval_seconds: 60,
+            },
+            bonds: BondPolicyConfig {
+                enabled: true,
+                default_yield_period_seconds: 3_600,
+                max_yield_bps: 5_000,
+                min_maturity_seconds: 3_600,
+                max_maturity_seconds: 7_776_000,
+                max_open_issuances_per_user: 10,
+                worker_interval_seconds: 60,
             },
             manifold: ManifoldConfig {
                 api_base_url: "https://api.manifold.markets/v0".to_string(),

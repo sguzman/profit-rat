@@ -1,3 +1,4 @@
+mod bonds;
 mod charts;
 mod help;
 mod leaderboard;
@@ -14,6 +15,11 @@ pub fn all() -> Vec<poise::Command<crate::bot::Data, AppError>> {
         charts::histogram_holders(),
         charts::histogram_position(),
         charts::histogram_time(),
+        charts::histogram_book(),
+        bonds::create_bond(),
+        bonds::list_bonds(),
+        bonds::buy_bond(),
+        bonds::my_bonds(),
         help::help(),
         help::tutorial(),
         help::list_commands(),

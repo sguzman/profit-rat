@@ -87,6 +87,8 @@ async fn list_guilds(pool: &DbPool) -> AppResult<()> {
             SELECT guild_id FROM asset_offers
             UNION
             SELECT guild_id FROM loans
+            UNION
+            SELECT guild_id FROM bond_issuances
          )
          SELECT
             g.guild_id,
@@ -97,7 +99,8 @@ async fn list_guilds(pool: &DbPool) -> AppResult<()> {
             (SELECT COUNT(*) FROM asset_offers ao WHERE ao.guild_id = g.guild_id) AS asset_offers,
             (SELECT COUNT(*) FROM share_transfer_offers so JOIN markets m ON m.id = so.market_id WHERE m.guild_id = g.guild_id) AS legacy_share_offers,
             (SELECT COUNT(*) FROM loans l WHERE l.guild_id = g.guild_id) AS loans,
-            (SELECT COUNT(*) FROM economy_events ee WHERE ee.guild_id = g.guild_id) AS economy_events
+            (SELECT COUNT(*) FROM economy_events ee WHERE ee.guild_id = g.guild_id) AS economy_events,
+            (SELECT COUNT(*) FROM bond_issuances bi WHERE bi.guild_id = g.guild_id) AS bonds
          FROM guilds g
          ORDER BY g.guild_id ASC",
     )
@@ -112,7 +115,7 @@ async fn list_guilds(pool: &DbPool) -> AppResult<()> {
     println!("Present guild economies:");
     for row in rows {
         println!(
-            "- guild_id={} accounts={} markets={} positions={} trades={} asset_offers={} legacy_share_offers={} loans={} economy_events={}",
+            "- guild_id={} accounts={} markets={} positions={} trades={} asset_offers={} legacy_share_offers={} loans={} economy_events={} bonds={}",
             row.get::<String, _>("guild_id"),
             row.get::<i64, _>("accounts"),
             row.get::<i64, _>("markets"),
@@ -122,6 +125,7 @@ async fn list_guilds(pool: &DbPool) -> AppResult<()> {
             row.get::<i64, _>("legacy_share_offers"),
             row.get::<i64, _>("loans"),
             row.get::<i64, _>("economy_events"),
+            row.get::<i64, _>("bonds"),
         );
     }
 
@@ -142,6 +146,8 @@ async fn delete_guild(pool: &DbPool, guild_id: &str) -> AppResult<()> {
             SELECT guild_id FROM asset_offers
             UNION
             SELECT guild_id FROM loans
+            UNION
+            SELECT guild_id FROM bond_issuances
          )
          WHERE guild_id = ?1",
     )
@@ -177,6 +183,8 @@ async fn delete_all_guilds(pool: &DbPool) -> AppResult<()> {
             SELECT guild_id FROM asset_offers
             UNION
             SELECT guild_id FROM loans
+            UNION
+            SELECT guild_id FROM bond_issuances
          )
          ORDER BY guild_id ASC",
     )
@@ -217,6 +225,16 @@ async fn delete_guild_in_tx(
         .await?;
 
     sqlx::query("DELETE FROM loans WHERE guild_id = ?1")
+        .bind(guild_id)
+        .execute(&mut **tx)
+        .await?;
+
+    sqlx::query("DELETE FROM bond_positions WHERE guild_id = ?1")
+        .bind(guild_id)
+        .execute(&mut **tx)
+        .await?;
+
+    sqlx::query("DELETE FROM bond_issuances WHERE guild_id = ?1")
         .bind(guild_id)
         .execute(&mut **tx)
         .await?;

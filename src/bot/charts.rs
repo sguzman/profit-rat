@@ -97,6 +97,30 @@ pub fn render_position_histogram(
     )
 }
 
+#[instrument(skip(config, levels))]
+pub fn render_market_depth_histogram(
+    config: &AppConfig,
+    market_id: i64,
+    question: &str,
+    side_label: &str,
+    levels: &[(String, f64, String)],
+) -> AppResult<ChartArtifact> {
+    let bars = levels
+        .iter()
+        .map(|(label, value, detail)| (label.clone(), *value, detail.clone()))
+        .collect::<Vec<_>>();
+
+    render_bar_chart(
+        config,
+        "book-depth-histogram",
+        &format!("Market Depth Histogram · #{}", market_id),
+        &format!("{question} · {side_label} side"),
+        "Open shares at level",
+        &bars,
+        bars.iter().map(|(_, value, _)| *value).fold(0.0, f64::max),
+    )
+}
+
 #[instrument(skip(config, history))]
 pub fn render_time_series_chart(
     config: &AppConfig,
