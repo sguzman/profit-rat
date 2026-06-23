@@ -119,7 +119,7 @@ impl UserService {
             .await?;
         let next_claim_at = account
             .last_claim_at()
-            .map(|last| last + Duration::seconds(self.config.claim_cooldown_seconds));
+            .map(|last| last + Duration::seconds(self.config.claim_period_seconds));
         Ok(BalanceSummary {
             balance_mana: account.balance_mana,
             total_claimed_mana: account.total_claimed_mana,
@@ -139,7 +139,7 @@ impl UserService {
             .await?;
         let now = Utc::now();
         if let Some(last_claim_at) = account.last_claim_at() {
-            let next = last_claim_at + Duration::seconds(self.config.claim_cooldown_seconds);
+            let next = last_claim_at + Duration::seconds(self.config.claim_period_seconds);
             if now < next {
                 return Err(AppError::Conflict(format!(
                     "claim is on cooldown until {}",
@@ -159,7 +159,7 @@ impl UserService {
              WHERE guild_id = ?1 AND discord_user_id = ?4",
         )
         .bind(guild_id)
-        .bind(self.config.hourly_claim)
+        .bind(self.config.claim_amount)
         .bind(&claimed_at)
         .bind(discord_user_id)
         .execute(&mut *tx)
@@ -168,11 +168,11 @@ impl UserService {
         sqlx::query(
             "INSERT INTO economy_events
              (guild_id, discord_user_id, related_market_id, related_option_id, asset_type, amount_mana, amount_shares, reason, note, created_at)
-             VALUES (?1, ?2, NULL, NULL, 'money', ?3, NULL, 'hourly_claim', 'hourly faucet claim', ?4)",
+             VALUES (?1, ?2, NULL, NULL, 'money', ?3, NULL, 'period_claim', 'login claim payout', ?4)",
         )
         .bind(guild_id)
         .bind(discord_user_id)
-        .bind(self.config.hourly_claim)
+        .bind(self.config.claim_amount)
         .bind(&claimed_at)
         .execute(&mut *tx)
         .await?;
@@ -190,9 +190,9 @@ impl UserService {
         .get::<i64, _>("balance_mana");
 
         Ok(ClaimReceipt {
-            amount_mana: self.config.hourly_claim,
+            amount_mana: self.config.claim_amount,
             balance_mana: balance,
-            next_claim_at: now + Duration::seconds(self.config.claim_cooldown_seconds),
+            next_claim_at: now + Duration::seconds(self.config.claim_period_seconds),
         })
     }
 }
@@ -223,8 +223,9 @@ mod tests {
                     .replace('\\', "/")
             ),
             starting_balance: 1_000,
-            hourly_claim: 100,
-            claim_cooldown_seconds: 3_600,
+            claim_amount: 10_000,
+            claim_period_seconds: 43_200,
+            claim_period_name: "twice-daily login".to_string(),
             default_liquidity_b: 100.0,
             share_offer_expiration_seconds: 60,
             share_offer_cleanup_interval_seconds: 15,
@@ -233,8 +234,9 @@ mod tests {
             manifold_poll_interval_seconds: 120,
             policies: PolicyConfig {
                 starting_balance: 1_000,
-                hourly_claim: 100,
-                claim_cooldown_seconds: 3_600,
+                claim_amount: 10_000,
+                claim_period_seconds: 43_200,
+                claim_period_name: "twice-daily login".to_string(),
                 default_liquidity_b: 100.0,
                 share_offer_expiration_seconds: 60,
                 share_offer_cleanup_interval_seconds: 15,
@@ -304,7 +306,7 @@ mod tests {
             .claim("guild-a", "u1", "Test")
             .await
             .expect("first claim");
-        assert_eq!(first.balance_mana, 1_100);
+        assert_eq!(first.balance_mana, 11_000);
 
         let second = service.claim("guild-a", "u1", "Test").await;
         assert!(second.is_err());

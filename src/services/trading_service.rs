@@ -9,7 +9,9 @@ use tracing::{debug, instrument};
 use crate::config::AppConfig;
 use crate::db::{DbPool, now_rfc3339};
 use crate::domain::market::{MarketOptionRecord, MarketStatus, MarketType};
-use crate::domain::pricing::{lmsr_probabilities, sale_value_for_shares, shares_for_budget};
+use crate::domain::pricing::{
+    lmsr_cost, lmsr_probabilities, sale_value_for_shares, shares_for_budget,
+};
 use crate::error::{AppError, AppResult};
 use crate::integrations::manifold::ManifoldClient;
 
@@ -38,6 +40,18 @@ pub struct SellRequest {
     pub market_id: i64,
     pub option_label: String,
     pub shares: f64,
+}
+
+#[derive(Clone, Debug)]
+pub struct CreateLimitOrderRequest {
+    pub guild_id: String,
+    pub user_id: String,
+    pub display_name: String,
+    pub market_id: i64,
+    pub option_label: String,
+    pub quantity_shares: f64,
+    pub trigger_price: f64,
+    pub side: LimitOrderSide,
 }
 
 #[derive(Clone, Debug)]
@@ -103,6 +117,51 @@ pub struct IncomingShareOfferSummary {
     pub expires_at: chrono::DateTime<Utc>,
 }
 
+#[derive(Clone, Debug)]
+pub struct LimitOrderReceipt {
+    pub order_id: i64,
+    pub market_id: i64,
+    pub option_label: String,
+    pub side: String,
+    pub quantity_shares: f64,
+    pub trigger_price: f64,
+    pub status: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct LimitOrderSummary {
+    pub order_id: i64,
+    pub display_name: String,
+    pub option_label: String,
+    pub side: String,
+    pub quantity_shares: f64,
+    pub trigger_price: f64,
+    pub status: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct MarketBookView {
+    pub market_id: i64,
+    pub market_question: String,
+    pub buys: Vec<LimitOrderSummary>,
+    pub sells: Vec<LimitOrderSummary>,
+}
+
+#[derive(Clone, Debug)]
+pub enum LimitOrderSide {
+    Buy,
+    Sell,
+}
+
+impl LimitOrderSide {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Buy => "buy",
+            Self::Sell => "sell",
+        }
+    }
+}
+
 #[derive(Clone, Debug, FromRow)]
 struct ShareOfferRecord {
     id: i64,
@@ -127,6 +186,23 @@ struct IncomingOfferRow {
     expires_at: String,
     seller_display_name: Option<String>,
     seller_discord_user_id: String,
+}
+
+#[derive(Clone, Debug, FromRow)]
+struct MarketOrderRecord {
+    id: i64,
+    guild_id: String,
+    market_id: i64,
+    option_id: i64,
+    discord_user_id: String,
+    side: String,
+    quantity_shares: f64,
+    trigger_price: f64,
+    status: String,
+    created_at: String,
+    executed_at: Option<String>,
+    cancelled_at: Option<String>,
+    failure_note: Option<String>,
 }
 
 impl TradingService {
@@ -221,6 +297,220 @@ impl TradingService {
                     .await
             }
         }
+    }
+
+    #[instrument(skip(self))]
+    pub async fn create_limit_order(
+        &self,
+        request: CreateLimitOrderRequest,
+    ) -> AppResult<LimitOrderReceipt> {
+        self.ensure_account(&request.guild_id, &request.user_id, &request.display_name)
+            .await?;
+        let detail = self
+            .load_market_in_guild(&request.guild_id, request.market_id)
+            .await?;
+        if detail.market.status() != MarketStatus::Open {
+            return Err(AppError::Conflict(
+                "market is not open for limit orders".to_string(),
+            ));
+        }
+        if detail.market.market_type() != MarketType::Native {
+            return Err(AppError::Validation(
+                "limit orders are currently supported only for native markets".to_string(),
+            ));
+        }
+        if request.quantity_shares <= 0.0 {
+            return Err(AppError::Validation(
+                "limit order share quantity must be positive".to_string(),
+            ));
+        }
+        if !(0.0..=1.0).contains(&request.trigger_price) {
+            return Err(AppError::Validation(
+                "trigger price must be between 0% and 100%".to_string(),
+            ));
+        }
+
+        let option_index = find_option_index(&detail.options, &request.option_label)?;
+        let option = detail.options[option_index].clone();
+        if matches!(request.side, LimitOrderSide::Sell) {
+            let seller_shares = self
+                .position_shares(request.market_id, option.id, &request.user_id)
+                .await?;
+            if seller_shares + 1e-9 < request.quantity_shares {
+                return Err(AppError::Conflict(
+                    "you cannot place a sell order for more shares than you currently hold"
+                        .to_string(),
+                ));
+            }
+        }
+
+        let now = now_rfc3339();
+        let result = sqlx::query(
+            "INSERT INTO market_orders
+             (guild_id, market_id, option_id, discord_user_id, side, quantity_shares, trigger_price, status, created_at, executed_at, cancelled_at, failure_note)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'open', ?8, NULL, NULL, NULL)",
+        )
+        .bind(&request.guild_id)
+        .bind(request.market_id)
+        .bind(option.id)
+        .bind(&request.user_id)
+        .bind(request.side.as_str())
+        .bind(request.quantity_shares)
+        .bind(request.trigger_price)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+        let order_id = result.last_insert_rowid();
+        debug!(
+            order_id,
+            market_id = request.market_id,
+            side = request.side.as_str(),
+            trigger_price = request.trigger_price,
+            quantity_shares = request.quantity_shares,
+            "created limit order"
+        );
+        self.process_limit_orders_for_market(request.market_id).await?;
+
+        let row = sqlx::query_as::<_, MarketOrderRecord>(
+            "SELECT id, guild_id, market_id, option_id, discord_user_id, side, quantity_shares, trigger_price, status, created_at, executed_at, cancelled_at, failure_note
+             FROM market_orders WHERE id = ?1",
+        )
+        .bind(order_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(LimitOrderReceipt {
+            order_id,
+            market_id: request.market_id,
+            option_label: option.label,
+            side: row.side,
+            quantity_shares: row.quantity_shares,
+            trigger_price: row.trigger_price,
+            status: row.status,
+        })
+    }
+
+    #[instrument(skip(self))]
+    pub async fn market_book(
+        &self,
+        guild_id: &str,
+        market_id: i64,
+    ) -> AppResult<MarketBookView> {
+        let detail = self.load_market_in_guild(guild_id, market_id).await?;
+        let rows = sqlx::query(
+            "SELECT
+                o.id,
+                o.side,
+                o.quantity_shares,
+                o.trigger_price,
+                o.status,
+                mo.label AS option_label,
+                ga.display_name,
+                o.discord_user_id
+             FROM market_orders o
+             JOIN market_options mo ON mo.id = o.option_id
+             LEFT JOIN guild_accounts ga
+               ON ga.guild_id = o.guild_id
+              AND ga.discord_user_id = o.discord_user_id
+             WHERE o.guild_id = ?1 AND o.market_id = ?2 AND o.status = 'open'
+             ORDER BY
+               CASE WHEN o.side = 'buy' THEN o.trigger_price END DESC,
+               CASE WHEN o.side = 'sell' THEN o.trigger_price END ASC,
+               o.id ASC",
+        )
+        .bind(guild_id)
+        .bind(market_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut buys = Vec::new();
+        let mut sells = Vec::new();
+        for row in rows {
+            let summary = LimitOrderSummary {
+                order_id: row.get("id"),
+                display_name: row
+                    .get::<Option<String>, _>("display_name")
+                    .unwrap_or_else(|| row.get::<String, _>("discord_user_id")),
+                option_label: row.get("option_label"),
+                side: row.get("side"),
+                quantity_shares: row.get("quantity_shares"),
+                trigger_price: row.get("trigger_price"),
+                status: row.get("status"),
+            };
+            if summary.side == "buy" {
+                buys.push(summary);
+            } else {
+                sells.push(summary);
+            }
+        }
+
+        Ok(MarketBookView {
+            market_id,
+            market_question: detail.market.question,
+            buys,
+            sells,
+        })
+    }
+
+    #[instrument(skip(self))]
+    pub async fn my_open_orders(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+    ) -> AppResult<Vec<LimitOrderSummary>> {
+        let rows = sqlx::query(
+            "SELECT
+                o.id,
+                o.side,
+                o.quantity_shares,
+                o.trigger_price,
+                o.status,
+                mo.label AS option_label,
+                m.question
+             FROM market_orders o
+             JOIN market_options mo ON mo.id = o.option_id
+             JOIN markets m ON m.id = o.market_id
+             WHERE o.guild_id = ?1 AND o.discord_user_id = ?2 AND o.status = 'open'
+             ORDER BY o.market_id ASC, o.id ASC",
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| LimitOrderSummary {
+                order_id: row.get("id"),
+                display_name: row.get::<String, _>("question"),
+                option_label: row.get("option_label"),
+                side: row.get("side"),
+                quantity_shares: row.get("quantity_shares"),
+                trigger_price: row.get("trigger_price"),
+                status: row.get("status"),
+            })
+            .collect())
+    }
+
+    #[instrument(skip(self))]
+    pub async fn cancel_order(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+        order_id: i64,
+    ) -> AppResult<bool> {
+        let result = sqlx::query(
+            "UPDATE market_orders
+             SET status = 'cancelled', cancelled_at = ?4, failure_note = 'cancelled by user'
+             WHERE id = ?1 AND guild_id = ?2 AND discord_user_id = ?3 AND status = 'open'",
+        )
+        .bind(order_id)
+        .bind(guild_id)
+        .bind(user_id)
+        .bind(now_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
     }
 
     #[instrument(skip(self))]
@@ -748,6 +1038,7 @@ impl TradingService {
         )
         .await?;
         tx.commit().await?;
+        self.process_limit_orders_for_market(request.market_id).await?;
 
         let balance_mana = self.user_balance(&request.guild_id, &request.user_id).await?;
         Ok(TradeReceipt {
@@ -756,6 +1047,96 @@ impl TradingService {
             option_label: option.label,
             balance_mana,
             mana_amount: request.amount_mana,
+            shares_delta,
+            price_before,
+            price_after,
+        })
+    }
+
+    async fn buy_native_exact_shares(
+        &self,
+        request: BuyRequest,
+        options: &[MarketOptionRecord],
+        option_index: usize,
+        option: MarketOptionRecord,
+        shares_delta: f64,
+    ) -> AppResult<TradeReceipt> {
+        let shares_state = options
+            .iter()
+            .map(|item| item.shares_outstanding)
+            .collect::<Vec<_>>();
+        let liquidity_b = self.market_liquidity(request.market_id).await?;
+        let probabilities_before = lmsr_probabilities(&shares_state, liquidity_b)?;
+        let price_before = probabilities_before[option_index];
+        let amount_mana =
+            buy_cost_for_shares(&shares_state, option_index, shares_delta, liquidity_b)?.round()
+                as i64;
+        let mut updated_shares = shares_state.clone();
+        updated_shares[option_index] += shares_delta;
+        let probabilities_after = lmsr_probabilities(&updated_shares, liquidity_b)?;
+        let price_after = probabilities_after[option_index];
+
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "UPDATE guild_accounts
+             SET balance_mana = balance_mana - ?2, updated_at = ?3
+             WHERE guild_id = ?1 AND discord_user_id = ?4",
+        )
+        .bind(&request.guild_id)
+        .bind(amount_mana)
+        .bind(now_rfc3339())
+        .bind(&request.user_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE market_options SET shares_outstanding = shares_outstanding + ?2 WHERE id = ?1",
+        )
+        .bind(option.id)
+        .bind(shares_delta)
+        .execute(&mut *tx)
+        .await?;
+        self.upsert_position(
+            &mut tx,
+            request.market_id,
+            option.id,
+            &request.user_id,
+            shares_delta,
+            amount_mana,
+            0,
+        )
+        .await?;
+        self.insert_trade(
+            &mut tx,
+            request.market_id,
+            option.id,
+            &request.user_id,
+            "limit_buy",
+            amount_mana,
+            shares_delta,
+            price_before,
+            price_after,
+            None,
+            None,
+        )
+        .await?;
+        self.insert_balance_event(
+            &mut tx,
+            &request.guild_id,
+            &request.user_id,
+            -amount_mana,
+            "limit_buy",
+            request.market_id,
+            Some(option.id),
+        )
+        .await?;
+        tx.commit().await?;
+
+        Ok(TradeReceipt {
+            market_id: request.market_id,
+            market_type: "native".to_string(),
+            option_label: option.label,
+            balance_mana: self.user_balance(&request.guild_id, &request.user_id).await?,
+            mana_amount: amount_mana,
             shares_delta,
             price_before,
             price_after,
@@ -829,6 +1210,7 @@ impl TradingService {
         )
         .await?;
         tx.commit().await?;
+        self.process_limit_orders_for_market(request.market_id).await?;
 
         Ok(TradeReceipt {
             market_id: request.market_id,
@@ -849,6 +1231,22 @@ impl TradingService {
         options: &[MarketOptionRecord],
         option_index: usize,
         option: MarketOptionRecord,
+    ) -> AppResult<TradeReceipt> {
+        let receipt = self
+            .sell_native_internal(request, liquidity_b, options, option_index, option, "sell")
+            .await?;
+        self.process_limit_orders_for_market(receipt.market_id).await?;
+        Ok(receipt)
+    }
+
+    async fn sell_native_internal(
+        &self,
+        request: SellRequest,
+        liquidity_b: f64,
+        options: &[MarketOptionRecord],
+        option_index: usize,
+        option: MarketOptionRecord,
+        trade_side: &str,
     ) -> AppResult<TradeReceipt> {
         let shares_state = options
             .iter()
@@ -902,7 +1300,7 @@ impl TradingService {
             request.market_id,
             option.id,
             &request.user_id,
-            "sell",
+            trade_side,
             revenue,
             -request.shares,
             price_before,
@@ -1009,6 +1407,128 @@ impl TradingService {
             price_before: price,
             price_after: price,
         })
+    }
+
+    async fn process_limit_orders_for_market(&self, market_id: i64) -> AppResult<()> {
+        for _ in 0..50 {
+            let progress = self.try_execute_next_limit_order(market_id).await?;
+            if !progress {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    async fn try_execute_next_limit_order(&self, market_id: i64) -> AppResult<bool> {
+        let detail = self.load_market(market_id).await?;
+        if detail.market.market_type() != MarketType::Native || detail.market.status() != MarketStatus::Open {
+            return Ok(false);
+        }
+        let shares_state = detail
+            .options
+            .iter()
+            .map(|option| option.shares_outstanding)
+            .collect::<Vec<_>>();
+        let probabilities = lmsr_probabilities(&shares_state, detail.market.liquidity_b)?;
+
+        let orders = sqlx::query_as::<_, MarketOrderRecord>(
+            "SELECT id, guild_id, market_id, option_id, discord_user_id, side, quantity_shares, trigger_price, status, created_at, executed_at, cancelled_at, failure_note
+             FROM market_orders
+             WHERE market_id = ?1 AND status = 'open'
+             ORDER BY created_at ASC, id ASC",
+        )
+        .bind(market_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        for order in orders {
+            let Some(option_index) = detail.options.iter().position(|option| option.id == order.option_id) else {
+                self.fail_market_order(order.id, "option no longer exists").await?;
+                return Ok(true);
+            };
+            let current_price = probabilities[option_index];
+            let should_fire = match order.side.as_str() {
+                "buy" => current_price <= order.trigger_price + 1e-9,
+                "sell" => current_price >= order.trigger_price - 1e-9,
+                _ => {
+                    self.fail_market_order(order.id, "unknown order side").await?;
+                    return Ok(true);
+                }
+            };
+            if !should_fire {
+                continue;
+            }
+
+            let option = detail.options[option_index].clone();
+            match order.side.as_str() {
+                "buy" => {
+                    let estimated_cost = buy_cost_for_shares(
+                        &shares_state,
+                        option_index,
+                        order.quantity_shares,
+                        detail.market.liquidity_b,
+                    )?
+                    .round() as i64;
+                    let balance = self.user_balance(&order.guild_id, &order.discord_user_id).await?;
+                    if balance < estimated_cost {
+                        self.fail_market_order(order.id, "insufficient balance at trigger time")
+                            .await?;
+                        return Ok(true);
+                    }
+                    let request = BuyRequest {
+                        guild_id: order.guild_id.clone(),
+                        user_id: order.discord_user_id.clone(),
+                        display_name: self.user_display_name(&order.guild_id, &order.discord_user_id).await?,
+                        market_id,
+                        option_label: option.label.clone(),
+                        amount_mana: estimated_cost,
+                    };
+                    let _ = self.buy_native_exact_shares(
+                        request,
+                        &detail.options,
+                        option_index,
+                        option,
+                        order.quantity_shares,
+                    )
+                    .await?;
+                    self.mark_market_order_executed(order.id).await?;
+                    return Ok(true);
+                }
+                "sell" => {
+                    let held = self
+                        .position_shares(market_id, order.option_id, &order.discord_user_id)
+                        .await?;
+                    if held + 1e-9 < order.quantity_shares {
+                        self.fail_market_order(order.id, "not enough shares at trigger time")
+                            .await?;
+                        return Ok(true);
+                    }
+                    let request = SellRequest {
+                        guild_id: order.guild_id.clone(),
+                        user_id: order.discord_user_id.clone(),
+                        display_name: self.user_display_name(&order.guild_id, &order.discord_user_id).await?,
+                        market_id,
+                        option_label: option.label.clone(),
+                        shares: order.quantity_shares,
+                    };
+                    let _ = self
+                        .sell_native_internal(
+                            request,
+                            detail.market.liquidity_b,
+                            &detail.options,
+                            option_index,
+                            option,
+                            "limit_sell",
+                        )
+                        .await?;
+                    self.mark_market_order_executed(order.id).await?;
+                    return Ok(true);
+                }
+                _ => unreachable!(),
+            }
+        }
+
+        Ok(false)
     }
 
     async fn ensure_recent_external_snapshot(
@@ -1395,6 +1915,33 @@ impl TradingService {
         .await?;
         Ok(())
     }
+
+    async fn mark_market_order_executed(&self, order_id: i64) -> AppResult<()> {
+        sqlx::query(
+            "UPDATE market_orders
+             SET status = 'executed', executed_at = ?2
+             WHERE id = ?1",
+        )
+        .bind(order_id)
+        .bind(now_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn fail_market_order(&self, order_id: i64, note: &str) -> AppResult<()> {
+        sqlx::query(
+            "UPDATE market_orders
+             SET status = 'cancelled', cancelled_at = ?2, failure_note = ?3
+             WHERE id = ?1",
+        )
+        .bind(order_id)
+        .bind(now_rfc3339())
+        .bind(note)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
 }
 
 fn find_option_index(options: &[MarketOptionRecord], option_label: &str) -> AppResult<usize> {
@@ -1416,4 +1963,22 @@ fn ui_safe_trim(value: &str, max_chars: usize) -> String {
         out.push_str("...");
     }
     out
+}
+
+fn buy_cost_for_shares(
+    shares: &[f64],
+    option_index: usize,
+    shares_delta: f64,
+    liquidity_b: f64,
+) -> AppResult<f64> {
+    if shares_delta <= 0.0 {
+        return Err(AppError::Validation(
+            "limit order share quantity must be positive".to_string(),
+        ));
+    }
+    let before = lmsr_cost(shares, liquidity_b)?;
+    let mut updated = shares.to_vec();
+    updated[option_index] += shares_delta;
+    let after = lmsr_cost(&updated, liquidity_b)?;
+    Ok((after - before).max(0.0))
 }

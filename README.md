@@ -42,6 +42,8 @@ Notes:
 - `/claim`
 - `/leaderboard`
 
+The default faucet is now a `twice-daily login` claim paying `10,000` each period.
+
 ### Markets
 
 - `/create_market`
@@ -60,6 +62,11 @@ Notes:
 
 - `/buy`
 - `/sell`
+- `/limit_buy`
+- `/limit_sell`
+- `/market_book`
+- `/my_orders`
+- `/cancel_order`
 - `/positions`
 - `/mpositions`
 
@@ -107,6 +114,9 @@ Notes:
 - Profit Rat controls pricing
 - Profit Rat controls resolution
 - Buying and selling move price through LMSR
+- Native markets now support inspectable limit-order books
+- Limit buys trigger when an option falls to or below your target percent
+- Limit sells trigger when an option rises to or above your target percent
 - Only the market creator can resolve by default
 - The market creator can delegate resolve/edit power with `/add_mod`
 - Native markets can be resolved as `N/A`, which refunds refundable exposure

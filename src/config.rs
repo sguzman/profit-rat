@@ -22,8 +22,9 @@ pub struct AppConfig {
     pub manifold: ManifoldConfig,
     pub currency: CurrencyConfig,
     pub starting_balance: i64,
-    pub hourly_claim: i64,
-    pub claim_cooldown_seconds: i64,
+    pub claim_amount: i64,
+    pub claim_period_seconds: i64,
+    pub claim_period_name: String,
     pub default_liquidity_b: f64,
     pub manifold_api_base_url: String,
     pub manifold_snapshot_ttl_seconds: i64,
@@ -35,8 +36,9 @@ pub struct AppConfig {
 #[derive(Clone, Debug)]
 pub struct PolicyConfig {
     pub starting_balance: i64,
-    pub hourly_claim: i64,
-    pub claim_cooldown_seconds: i64,
+    pub claim_amount: i64,
+    pub claim_period_seconds: i64,
+    pub claim_period_name: String,
     pub default_liquidity_b: f64,
     pub share_offer_expiration_seconds: i64,
     pub share_offer_cleanup_interval_seconds: i64,
@@ -152,16 +154,22 @@ impl AppConfig {
                 .starting_balance
                 .map(Ok)
                 .unwrap_or_else(|| env_i64("STARTING_BALANCE", 1_000))?,
-            hourly_claim: merged
+            claim_amount: merged
                 .policies
-                .hourly_claim
+                .claim_amount
+                .or(merged.policies.hourly_claim)
                 .map(Ok)
-                .unwrap_or_else(|| env_i64("HOURLY_CLAIM", 100))?,
-            claim_cooldown_seconds: merged
+                .unwrap_or_else(|| env_i64("CLAIM_AMOUNT", 10_000))?,
+            claim_period_seconds: merged
                 .policies
-                .claim_cooldown_seconds
+                .claim_period_seconds
+                .or(merged.policies.claim_cooldown_seconds)
                 .map(Ok)
-                .unwrap_or_else(|| env_i64("CLAIM_COOLDOWN_SECONDS", 3_600))?,
+                .unwrap_or_else(|| env_i64("CLAIM_PERIOD_SECONDS", 43_200))?,
+            claim_period_name: merged
+                .policies
+                .claim_period_name
+                .unwrap_or_else(|| "twice-daily login".to_string()),
             default_liquidity_b: merged
                 .policies
                 .default_liquidity_b
@@ -265,8 +273,9 @@ impl AppConfig {
             manifold: manifold.clone(),
             currency,
             starting_balance: policy.starting_balance,
-            hourly_claim: policy.hourly_claim,
-            claim_cooldown_seconds: policy.claim_cooldown_seconds,
+            claim_amount: policy.claim_amount,
+            claim_period_seconds: policy.claim_period_seconds,
+            claim_period_name: policy.claim_period_name.clone(),
             default_liquidity_b: policy.default_liquidity_b,
             manifold_api_base_url: manifold.api_base_url.clone(),
             manifold_snapshot_ttl_seconds: manifold.snapshot_ttl_seconds,
@@ -380,9 +389,15 @@ struct PartialPolicyConfig {
     #[serde(default)]
     starting_balance: Option<i64>,
     #[serde(default)]
+    claim_amount: Option<i64>,
+    #[serde(default)]
     hourly_claim: Option<i64>,
     #[serde(default)]
+    claim_period_seconds: Option<i64>,
+    #[serde(default)]
     claim_cooldown_seconds: Option<i64>,
+    #[serde(default)]
+    claim_period_name: Option<String>,
     #[serde(default)]
     default_liquidity_b: Option<f64>,
     #[serde(default)]
@@ -395,10 +410,15 @@ impl PartialPolicyConfig {
     fn merge(self, overlay: Self) -> Self {
         Self {
             starting_balance: overlay.starting_balance.or(self.starting_balance),
+            claim_amount: overlay.claim_amount.or(self.claim_amount),
             hourly_claim: overlay.hourly_claim.or(self.hourly_claim),
+            claim_period_seconds: overlay
+                .claim_period_seconds
+                .or(self.claim_period_seconds),
             claim_cooldown_seconds: overlay
                 .claim_cooldown_seconds
                 .or(self.claim_cooldown_seconds),
+            claim_period_name: overlay.claim_period_name.or(self.claim_period_name),
             default_liquidity_b: overlay.default_liquidity_b.or(self.default_liquidity_b),
             share_offer_expiration_seconds: overlay
                 .share_offer_expiration_seconds
@@ -632,8 +652,9 @@ mod tests {
             ),
             policies: PolicyConfig {
                 starting_balance: 1_000,
-                hourly_claim: 100,
-                claim_cooldown_seconds: 3_600,
+                claim_amount: 10_000,
+                claim_period_seconds: 43_200,
+                claim_period_name: "twice-daily login".to_string(),
                 default_liquidity_b: 100.0,
                 share_offer_expiration_seconds: 60,
                 share_offer_cleanup_interval_seconds: 15,
@@ -688,8 +709,9 @@ mod tests {
                 short_suffixes: true,
             },
             starting_balance: 1_000,
-            hourly_claim: 100,
-            claim_cooldown_seconds: 3_600,
+            claim_amount: 10_000,
+            claim_period_seconds: 43_200,
+            claim_period_name: "twice-daily login".to_string(),
             default_liquidity_b: 100.0,
             manifold_api_base_url: "https://api.manifold.markets/v0".to_string(),
             manifold_snapshot_ttl_seconds: 60,

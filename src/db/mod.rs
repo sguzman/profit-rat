@@ -135,8 +135,9 @@ mod tests {
                     .replace('\\', "/")
             ),
             starting_balance: 1_000,
-            hourly_claim: 100,
-            claim_cooldown_seconds: 3_600,
+            claim_amount: 10_000,
+            claim_period_seconds: 43_200,
+            claim_period_name: "twice-daily login".to_string(),
             default_liquidity_b: 100.0,
             share_offer_expiration_seconds: 60,
             share_offer_cleanup_interval_seconds: 15,
@@ -145,8 +146,9 @@ mod tests {
             manifold_poll_interval_seconds: 120,
             policies: PolicyConfig {
                 starting_balance: 1_000,
-                hourly_claim: 100,
-                claim_cooldown_seconds: 3_600,
+                claim_amount: 10_000,
+                claim_period_seconds: 43_200,
+                claim_period_name: "twice-daily login".to_string(),
                 default_liquidity_b: 100.0,
                 share_offer_expiration_seconds: 60,
                 share_offer_cleanup_interval_seconds: 15,

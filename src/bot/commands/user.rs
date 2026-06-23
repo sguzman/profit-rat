@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use poise::serenity_prelude as serenity;
 
 use crate::bot::ui;
-use crate::bot::{Context, display_name};
+use crate::bot::{display_name, Context};
 use crate::error::AppError;
 
 #[poise::command(slash_command)]
@@ -10,8 +10,8 @@ pub async fn ping(ctx: Context<'_>) -> Result<(), AppError> {
     ui::send_embed(
         ctx,
         "🐀 Profit Rat Online",
-        "The rat is awake, logging hard, and hoarding fake mana for the server.",
-        poise::serenity_prelude::Colour::from_rgb(52, 152, 219),
+        "The rat is awake, logging hard, and hoarding fake money for the server.",
+        serenity::Colour::from_rgb(52, 152, 219),
     )
     .await?;
     Ok(())
@@ -43,7 +43,7 @@ pub async fn balance(
             ui::money(config, summary.balance_mana),
             ui::money(config, summary.total_claimed_mana)
         ),
-        poise::serenity_prelude::Colour::from_rgb(241, 196, 15),
+        serenity::Colour::from_rgb(241, 196, 15),
     )
     .await?;
     Ok(())
@@ -64,14 +64,15 @@ pub async fn claim(ctx: Context<'_>) -> Result<(), AppError> {
     let config = ctx.data().config.as_ref();
     ui::send_embed(
         ctx,
-        "🪙 Claim Collected",
+        "🎁 Login Claim Collected",
         format!(
-            "The communal cope fountain paid out {}.\n**New balance:** {}\n**Next claim:** {}",
+            "The rat approved your {} payout of {}.\n**New balance:** {}\n**Next claim:** {}",
+            ctx.data().config.claim_period_name,
             ui::money(config, receipt.amount_mana),
             ui::money(config, receipt.balance_mana),
             discord_timestamp(receipt.next_claim_at)
         ),
-        poise::serenity_prelude::Colour::from_rgb(46, 204, 113),
+        serenity::Colour::from_rgb(46, 204, 113),
     )
     .await?;
     Ok(())

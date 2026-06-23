@@ -26,8 +26,9 @@ short_suffixes = true
 
 [policies]
 starting_balance = 100000
-hourly_claim = 1000
-claim_cooldown_seconds = 3600
+claim_amount = 10000
+claim_period_seconds = 43200
+claim_period_name = "twice-daily login"
 default_liquidity_b = 100.0
 share_offer_expiration_seconds = 60
 share_offer_cleanup_interval_seconds = 15

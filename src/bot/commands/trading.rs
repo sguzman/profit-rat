@@ -1,13 +1,16 @@
 use crate::bot::commands::market::{
     autocomplete_any_market, autocomplete_manifold_market, autocomplete_market_option,
-    autocomplete_open_market, parse_market_id,
+    autocomplete_native_market, autocomplete_open_market, autocomplete_open_native_market,
+    parse_market_id,
 };
 use crate::bot::ui;
 use crate::bot::{display_name, Context};
 use crate::config::AppConfig;
 use crate::error::AppError;
 use crate::services::market_service::PositionSummaryLine;
-use crate::services::trading_service::{BuyRequest, CreateShareOfferRequest, SellRequest};
+use crate::services::trading_service::{
+    BuyRequest, CreateLimitOrderRequest, CreateShareOfferRequest, LimitOrderSide, SellRequest,
+};
 use poise::serenity_prelude as serenity;
 
 #[poise::command(slash_command)]
@@ -107,6 +110,250 @@ pub async fn sell(
             ui::money(config, receipt.balance_mana)
         ),
         serenity::Colour::from_rgb(52, 152, 219),
+    )
+    .await?;
+    Ok(())
+}
+
+#[poise::command(slash_command)]
+pub async fn limit_buy(
+    ctx: Context<'_>,
+    #[description = "Pick an open native market"]
+    #[autocomplete = "autocomplete_open_native_market"]
+    market: String,
+    #[description = "Option label"]
+    #[autocomplete = "autocomplete_market_option"]
+    option: String,
+    #[description = "Shares to buy when triggered"] shares: f64,
+    #[description = "Trigger price in percent, e.g. 40 for 40%"] trigger_percent: f64,
+) -> Result<(), AppError> {
+    let guild_id = ctx.guild_id().ok_or_else(|| {
+        AppError::Validation("limit orders only work inside a server economy".to_string())
+    })?;
+    let market_id = parse_market_id(&market)?;
+    let receipt = ctx
+        .data()
+        .services
+        .trading
+        .create_limit_order(CreateLimitOrderRequest {
+            guild_id: guild_id.to_string(),
+            user_id: ctx.author().id.to_string(),
+            display_name: display_name(ctx.author()),
+            market_id,
+            option_label: option.clone(),
+            quantity_shares: shares,
+            trigger_price: trigger_percent / 100.0,
+            side: LimitOrderSide::Buy,
+        })
+        .await?;
+    ui::send_embed(
+        ctx,
+        "📗 Limit Buy Placed",
+        format!(
+            "**Order:** **#{}**\n**Market:** **#{}**\n**Option:** {} **{}**\n**Shares:** {}\n**Trigger:** buy when price is at or below {}\n**Status:** **{}**",
+            receipt.order_id,
+            receipt.market_id,
+            ui::option_emoji(&receipt.option_label),
+            receipt.option_label,
+            ui::shares(receipt.quantity_shares),
+            ui::percent(receipt.trigger_price),
+            receipt.status
+        ),
+        serenity::Colour::from_rgb(39, 174, 96),
+    )
+    .await?;
+    Ok(())
+}
+
+#[poise::command(slash_command)]
+pub async fn limit_sell(
+    ctx: Context<'_>,
+    #[description = "Pick an open native market"]
+    #[autocomplete = "autocomplete_open_native_market"]
+    market: String,
+    #[description = "Option label"]
+    #[autocomplete = "autocomplete_market_option"]
+    option: String,
+    #[description = "Shares to sell when triggered"] shares: f64,
+    #[description = "Trigger price in percent, e.g. 60 for 60%"] trigger_percent: f64,
+) -> Result<(), AppError> {
+    let guild_id = ctx.guild_id().ok_or_else(|| {
+        AppError::Validation("limit orders only work inside a server economy".to_string())
+    })?;
+    let market_id = parse_market_id(&market)?;
+    let receipt = ctx
+        .data()
+        .services
+        .trading
+        .create_limit_order(CreateLimitOrderRequest {
+            guild_id: guild_id.to_string(),
+            user_id: ctx.author().id.to_string(),
+            display_name: display_name(ctx.author()),
+            market_id,
+            option_label: option.clone(),
+            quantity_shares: shares,
+            trigger_price: trigger_percent / 100.0,
+            side: LimitOrderSide::Sell,
+        })
+        .await?;
+    ui::send_embed(
+        ctx,
+        "📕 Limit Sell Placed",
+        format!(
+            "**Order:** **#{}**\n**Market:** **#{}**\n**Option:** {} **{}**\n**Shares:** {}\n**Trigger:** sell when price is at or above {}\n**Status:** **{}**",
+            receipt.order_id,
+            receipt.market_id,
+            ui::option_emoji(&receipt.option_label),
+            receipt.option_label,
+            ui::shares(receipt.quantity_shares),
+            ui::percent(receipt.trigger_price),
+            receipt.status
+        ),
+        serenity::Colour::from_rgb(192, 57, 43),
+    )
+    .await?;
+    Ok(())
+}
+
+#[poise::command(slash_command)]
+pub async fn market_book(
+    ctx: Context<'_>,
+    #[description = "Pick a native market"]
+    #[autocomplete = "autocomplete_native_market"]
+    market: String,
+) -> Result<(), AppError> {
+    let guild_id = ctx.guild_id().ok_or_else(|| {
+        AppError::Validation("market books only exist inside a server economy".to_string())
+    })?;
+    let market_id = parse_market_id(&market)?;
+    let book = ctx
+        .data()
+        .services
+        .trading
+        .market_book(&guild_id.to_string(), market_id)
+        .await?;
+
+    let buys = if book.buys.is_empty() {
+        "No open buy orders.".to_string()
+    } else {
+        book.buys
+            .into_iter()
+            .take(12)
+            .map(|order| {
+                format!(
+                    "📗 **#{}** {} **{}** by **{}** at {}",
+                    order.order_id,
+                    ui::shares(order.quantity_shares),
+                    order.option_label,
+                    order.display_name,
+                    ui::percent(order.trigger_price)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let sells = if book.sells.is_empty() {
+        "No open sell orders.".to_string()
+    } else {
+        book.sells
+            .into_iter()
+            .take(12)
+            .map(|order| {
+                format!(
+                    "📕 **#{}** {} **{}** by **{}** at {}",
+                    order.order_id,
+                    ui::shares(order.quantity_shares),
+                    order.option_label,
+                    order.display_name,
+                    ui::percent(order.trigger_price)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    ui::send_embed(
+        ctx,
+        format!("📚 Market Book #{}", book.market_id),
+        format!("**{}**\n\n**Buy side**\n{}\n\n**Sell side**\n{}", book.market_question, buys, sells),
+        serenity::Colour::from_rgb(142, 68, 173),
+    )
+    .await?;
+    Ok(())
+}
+
+#[poise::command(slash_command)]
+pub async fn my_orders(ctx: Context<'_>) -> Result<(), AppError> {
+    let guild_id = ctx.guild_id().ok_or_else(|| {
+        AppError::Validation("orders only exist inside a server economy".to_string())
+    })?;
+    let orders = ctx
+        .data()
+        .services
+        .trading
+        .my_open_orders(&guild_id.to_string(), &ctx.author().id.to_string())
+        .await?;
+    if orders.is_empty() {
+        ui::send_embed(
+            ctx,
+            "🧾 Your Orders",
+            "You do not have any open limit orders right now.",
+            serenity::Colour::from_rgb(127, 140, 141),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let body = orders
+        .into_iter()
+        .map(|order| {
+            format!(
+                "**#{}** {} {} **{}** at {}\n{}",
+                order.order_id,
+                if order.side == "buy" { "📗" } else { "📕" },
+                ui::shares(order.quantity_shares),
+                order.option_label,
+                ui::percent(order.trigger_price),
+                order.display_name
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    ui::send_embed(
+        ctx,
+        "🧾 Your Orders",
+        body,
+        serenity::Colour::from_rgb(52, 152, 219),
+    )
+    .await?;
+    Ok(())
+}
+
+#[poise::command(slash_command)]
+pub async fn cancel_order(
+    ctx: Context<'_>,
+    #[description = "Order id from /my_orders or /market_book"] order_id: i64,
+) -> Result<(), AppError> {
+    let guild_id = ctx.guild_id().ok_or_else(|| {
+        AppError::Validation("orders only exist inside a server economy".to_string())
+    })?;
+    let cancelled = ctx
+        .data()
+        .services
+        .trading
+        .cancel_order(&guild_id.to_string(), &ctx.author().id.to_string(), order_id)
+        .await?;
+    if !cancelled {
+        return Err(AppError::NotFound(
+            "open order not found for you in this server".to_string(),
+        ));
+    }
+    ui::send_embed(
+        ctx,
+        "🛑 Order Cancelled",
+        format!("Limit order **#{}** has been cancelled.", order_id),
+        serenity::Colour::from_rgb(231, 76, 60),
     )
     .await?;
     Ok(())
