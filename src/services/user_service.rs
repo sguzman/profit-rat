@@ -265,6 +265,8 @@ mod tests {
             bot: BotPolicyConfig {
                 auto_claim: true,
                 auto_accept_loans: true,
+                startup_announcement_channel_name: "bots".to_string(),
+                startup_announcement_fallback_channel_name: "general".to_string(),
                 max_loan_interest_bps: 500,
                 min_loan_duration_seconds: 3_600,
                 auto_buy_bonds: true,

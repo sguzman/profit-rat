@@ -75,6 +75,8 @@ pub struct LoanPolicyConfig {
 pub struct BotPolicyConfig {
     pub auto_claim: bool,
     pub auto_accept_loans: bool,
+    pub startup_announcement_channel_name: String,
+    pub startup_announcement_fallback_channel_name: String,
     pub max_loan_interest_bps: i64,
     pub min_loan_duration_seconds: i64,
     pub auto_buy_bonds: bool,
@@ -241,6 +243,14 @@ impl AppConfig {
         let bot = BotPolicyConfig {
             auto_claim: merged.bot.auto_claim.unwrap_or(true),
             auto_accept_loans: merged.bot.auto_accept_loans.unwrap_or(true),
+            startup_announcement_channel_name: merged
+                .bot
+                .startup_announcement_channel_name
+                .unwrap_or_else(|| "bots".to_string()),
+            startup_announcement_fallback_channel_name: merged
+                .bot
+                .startup_announcement_fallback_channel_name
+                .unwrap_or_else(|| "general".to_string()),
             max_loan_interest_bps: merged.bot.max_loan_interest_bps.unwrap_or(500),
             min_loan_duration_seconds: merged.bot.min_loan_duration_seconds.unwrap_or(3_600),
             auto_buy_bonds: merged.bot.auto_buy_bonds.unwrap_or(true),
@@ -603,6 +613,10 @@ struct PartialBotPolicyConfig {
     #[serde(default)]
     auto_accept_loans: Option<bool>,
     #[serde(default)]
+    startup_announcement_channel_name: Option<String>,
+    #[serde(default)]
+    startup_announcement_fallback_channel_name: Option<String>,
+    #[serde(default)]
     max_loan_interest_bps: Option<i64>,
     #[serde(default)]
     min_loan_duration_seconds: Option<i64>,
@@ -631,6 +645,12 @@ impl PartialBotPolicyConfig {
         Self {
             auto_claim: overlay.auto_claim.or(self.auto_claim),
             auto_accept_loans: overlay.auto_accept_loans.or(self.auto_accept_loans),
+            startup_announcement_channel_name: overlay
+                .startup_announcement_channel_name
+                .or(self.startup_announcement_channel_name),
+            startup_announcement_fallback_channel_name: overlay
+                .startup_announcement_fallback_channel_name
+                .or(self.startup_announcement_fallback_channel_name),
             max_loan_interest_bps: overlay
                 .max_loan_interest_bps
                 .or(self.max_loan_interest_bps),
@@ -842,6 +862,8 @@ mod tests {
             bot: BotPolicyConfig {
                 auto_claim: true,
                 auto_accept_loans: true,
+                startup_announcement_channel_name: "bots".to_string(),
+                startup_announcement_fallback_channel_name: "general".to_string(),
                 max_loan_interest_bps: 500,
                 min_loan_duration_seconds: 3_600,
                 auto_buy_bonds: true,

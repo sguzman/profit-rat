@@ -75,7 +75,8 @@ pub async fn sync_commands_and_announce(
     );
 
     for guild_id in guild_ids {
-        if let Some(channel_id) = pick_announcement_channel(ctx, services, guild_id).await? {
+        if let Some(channel_id) = pick_announcement_channel(ctx, services, config, guild_id).await?
+        {
             if let Err(error) = announce_command_changes(ctx, channel_id, &diff).await {
                 warn!(guild_id = %guild_id, %error, "failed to announce command changes");
             }
@@ -191,14 +192,26 @@ fn manifest_path(config: &AppConfig) -> PathBuf {
 async fn pick_announcement_channel(
     ctx: &serenity::Context,
     services: &Services,
+    config: &AppConfig,
     guild_id: serenity::GuildId,
 ) -> AppResult<Option<serenity::ChannelId>> {
-    if let Some(channel_id) = preferred_bots_channel(ctx, guild_id).await? {
+    if let Some(channel_id) = preferred_named_channel(
+        ctx,
+        guild_id,
+        &config.bot.startup_announcement_channel_name,
+    )
+    .await?
+    {
         return Ok(Some(channel_id));
     }
 
-    let partial_guild = guild_id.to_partial_guild(ctx).await?;
-    if let Some(channel_id) = partial_guild.system_channel_id {
+    if let Some(channel_id) = preferred_named_channel(
+        ctx,
+        guild_id,
+        &config.bot.startup_announcement_fallback_channel_name,
+    )
+    .await?
+    {
         return Ok(Some(channel_id));
     }
 
@@ -209,16 +222,22 @@ async fn pick_announcement_channel(
     Ok(fallback.map(serenity::ChannelId::new))
 }
 
-async fn preferred_bots_channel(
+async fn preferred_named_channel(
     ctx: &serenity::Context,
     guild_id: serenity::GuildId,
+    channel_name: &str,
 ) -> AppResult<Option<serenity::ChannelId>> {
+    let channel_name = channel_name.trim();
+    if channel_name.is_empty() {
+        return Ok(None);
+    }
+
     let channels = guild_id.channels(ctx).await?;
     Ok(channels
         .into_values()
         .find(|channel| {
             channel.kind == serenity::ChannelType::Text
-                && channel.name.eq_ignore_ascii_case("bots")
+                && channel.name.eq_ignore_ascii_case(channel_name)
         })
         .map(|channel| channel.id))
 }
@@ -327,6 +346,8 @@ mod tests {
             bot: BotPolicyConfig {
                 auto_claim: true,
                 auto_accept_loans: true,
+                startup_announcement_channel_name: "bots".to_string(),
+                startup_announcement_fallback_channel_name: "general".to_string(),
                 max_loan_interest_bps: 500,
                 min_loan_duration_seconds: 3_600,
                 auto_buy_bonds: true,

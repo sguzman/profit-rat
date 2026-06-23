@@ -57,6 +57,8 @@ max_open_loans_per_user = 10
 [bot]
 auto_claim = true
 auto_accept_loans = true
+startup_announcement_channel_name = "bots"
+startup_announcement_fallback_channel_name = "general"
 max_loan_interest_bps = 500
 min_loan_duration_seconds = 3600
 auto_buy_bonds = true
