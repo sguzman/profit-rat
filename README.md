@@ -101,6 +101,14 @@ The default faucet is now a `twice-daily login` claim paying `10,000` each perio
 - `/loan_status`
 - `/repay_loan`
 
+### Bonds
+
+- `/create_bond`
+- `/list_bonds`
+- `/buy_bond`
+- `/sell_bond`
+- `/my_bonds`
+
 ### Manifold Mirrors
 
 - `/track_manifold`
@@ -128,6 +136,13 @@ The default faucet is now a `twice-daily login` claim paying `10,000` each perio
 - Manifold controls resolution
 - Profit Rat stores local paper positions only
 - Buying and selling do not affect the external market
+
+## Bonds
+
+- Bond issuers pre-fund maturity escrow up front
+- `/buy_bond` lets a user buy an open issuance directly
+- `/sell_bond` asks Profit Rat to buy the bond immediately if it passes the bot's TOML-configured price, yield, maturity, and exposure rules
+- The bot will refuse bonds that fall outside its configured guardrails
 
 ## Guild Isolation
 

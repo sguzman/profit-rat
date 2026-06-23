@@ -162,6 +162,73 @@ pub async fn buy_bond(
 }
 
 #[poise::command(slash_command)]
+pub async fn sell_bond(
+    ctx: Context<'_>,
+    #[description = "Bond issuance to pitch to Profit Rat"]
+    #[autocomplete = "autocomplete_open_bond"]
+    bond: String,
+) -> Result<(), AppError> {
+    let guild_id = ctx.guild_id().ok_or_else(|| {
+        AppError::Validation("bonds only exist inside a server economy".to_string())
+    })?;
+    let issuance_id = parse_bond_id(&bond)?;
+    let bot_user = ctx.serenity_context().cache.current_user().clone();
+    let bot_display_name = bot_user
+        .global_name
+        .clone()
+        .unwrap_or_else(|| bot_user.name.clone());
+    let outcome = ctx
+        .data()
+        .services
+        .bonds
+        .sell_bond_to_bot(
+            &guild_id.to_string(),
+            &ctx.author().id.to_string(),
+            &display_name(ctx.author()),
+            &bot_user.id.to_string(),
+            &bot_display_name,
+            issuance_id,
+        )
+        .await?;
+
+    if let Some(receipt) = outcome.receipt {
+        ui::send_embed(
+            ctx,
+            "🤝 Bond Sold To Rat",
+            format!(
+                "**Bond:** **#{}** {}\n**Rat bought:** **{}** bond(s)\n**Rat spent:** {}\n**Rat projected payout:** {}\n**Remaining supply:** **{}**\n**Rat balance now:** {}\n\n✅ {}",
+                receipt.issuance_id,
+                receipt.title,
+                receipt.quantity,
+                ui::money(ctx.data().config.as_ref(), receipt.spent_mana),
+                ui::money(
+                    ctx.data().config.as_ref(),
+                    receipt.payout_at_maturity_mana
+                ),
+                receipt.remaining_bonds,
+                ui::money(ctx.data().config.as_ref(), receipt.buyer_balance_mana),
+                outcome.reason,
+            ),
+            serenity::Colour::from_rgb(39, 174, 96),
+        )
+        .await?;
+    } else {
+        ui::send_embed(
+            ctx,
+            "🧾 Bond Rejected",
+            format!(
+                "**Bond:** **#{}**\nProfit Rat passed on this one.\n\n❌ {}",
+                issuance_id, outcome.reason
+            ),
+            serenity::Colour::from_rgb(231, 76, 60),
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
+#[poise::command(slash_command)]
 pub async fn my_bonds(ctx: Context<'_>) -> Result<(), AppError> {
     let guild_id = ctx.guild_id().ok_or_else(|| {
         AppError::Validation("bonds only exist inside a server economy".to_string())

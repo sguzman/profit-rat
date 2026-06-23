@@ -19,6 +19,7 @@ pub fn all() -> Vec<poise::Command<crate::bot::Data, AppError>> {
         bonds::create_bond(),
         bonds::list_bonds(),
         bonds::buy_bond(),
+        bonds::sell_bond(),
         bonds::my_bonds(),
         help::help(),
         help::tutorial(),

@@ -70,6 +70,25 @@ pub struct BondPurchaseReceipt {
 }
 
 #[derive(Clone, Debug)]
+pub struct BotBondPolicy {
+    pub min_yield_bps: i64,
+    pub max_yield_bps: i64,
+    pub min_maturity_seconds: i64,
+    pub max_maturity_seconds: i64,
+    pub max_price_mana: i64,
+    pub max_purchase_quantity: i64,
+    pub max_total_exposure_mana: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct BotBondOfferOutcome {
+    pub accepted: bool,
+    pub quantity: i64,
+    pub reason: String,
+    pub receipt: Option<BondPurchaseReceipt>,
+}
+
+#[derive(Clone, Debug)]
 pub struct BondPositionLine {
     pub issuance_id: i64,
     pub title: String,
@@ -510,7 +529,16 @@ impl BondService {
         max_purchase_quantity: i64,
         max_total_exposure_mana: i64,
     ) -> AppResult<u64> {
-        if !self.config.bonds.enabled || max_purchase_quantity <= 0 {
+        let policy = BotBondPolicy {
+            min_yield_bps,
+            max_yield_bps,
+            min_maturity_seconds,
+            max_maturity_seconds,
+            max_price_mana,
+            max_purchase_quantity,
+            max_total_exposure_mana,
+        };
+        if !self.config.bonds.enabled || policy.max_purchase_quantity <= 0 {
             return Ok(0);
         }
         self.ensure_account(guild_id, buyer_user_id, buyer_display_name)
@@ -519,7 +547,7 @@ impl BondService {
         let current_exposure = self
             .open_exposure_for_holder(guild_id, buyer_user_id)
             .await?;
-        if current_exposure >= max_total_exposure_mana {
+        if current_exposure >= policy.max_total_exposure_mana {
             return Ok(0);
         }
 
@@ -543,69 +571,51 @@ impl BondService {
         .await?;
 
         let mut purchased = 0;
-        let mut remaining_exposure_budget = max_total_exposure_mana - current_exposure;
+        let mut remaining_exposure_budget = policy.max_total_exposure_mana - current_exposure;
         for row in rows {
-            let issuance_id = row.get::<i64, _>("id");
-            let issuer_user_id = row.get::<String, _>("issuer_discord_user_id");
-            if issuer_user_id == buyer_user_id {
-                continue;
-            }
+            let issuance = BondIssuanceRow {
+                id: row.get("id"),
+                guild_id: guild_id.to_string(),
+                issuer_discord_user_id: row.get("issuer_discord_user_id"),
+                title: row.get("title"),
+                price_per_bond_mana: row.get("price_per_bond_mana"),
+                payout_per_bond_mana: row.get("payout_per_bond_mana"),
+                total_bonds: 0,
+                remaining_bonds: row.get("remaining_bonds"),
+                escrow_reserved_mana: 0,
+                yield_bps: row.get("yield_bps"),
+                yield_period_seconds: row.get("yield_period_seconds"),
+                matures_at: row.get("matures_at"),
+                status: "open".to_string(),
+            };
 
-            let existing_position = sqlx::query(
-                "SELECT 1
-                 FROM bond_positions
-                 WHERE issuance_id = ?1 AND guild_id = ?2 AND holder_discord_user_id = ?3 AND bonds_owned > 0",
-            )
-            .bind(issuance_id)
-            .bind(guild_id)
-            .bind(buyer_user_id)
-            .fetch_optional(&self.pool)
-            .await?;
-            if existing_position.is_some() {
+            let evaluation = self
+                .evaluate_bot_bond_purchase(
+                    guild_id,
+                    buyer_user_id,
+                    &issuance,
+                    remaining_exposure_budget,
+                    &policy,
+                )
+                .await?;
+            let Some(quantity) = evaluation.approved_quantity else {
                 continue;
-            }
-
-            let price_per_bond_mana = row.get::<i64, _>("price_per_bond_mana");
-            let yield_bps = row.get::<i64, _>("yield_bps");
-            let remaining_bonds = row.get::<i64, _>("remaining_bonds");
-            let matures_at = parse_rfc3339_utc(&row.get::<String, _>("matures_at"))?;
-            let maturity_seconds = (matures_at - Utc::now()).num_seconds();
-
-            if price_per_bond_mana > max_price_mana
-                || yield_bps < min_yield_bps
-                || yield_bps > max_yield_bps
-                || maturity_seconds < min_maturity_seconds
-                || maturity_seconds > max_maturity_seconds
-                || remaining_bonds <= 0
-            {
-                continue;
-            }
-
-            let affordable_by_policy = (remaining_exposure_budget / price_per_bond_mana).max(0);
-            let affordable_by_balance =
-                (self.balance(guild_id, buyer_user_id).await? / price_per_bond_mana).max(0);
-            let quantity = remaining_bonds
-                .min(max_purchase_quantity)
-                .min(affordable_by_policy)
-                .min(affordable_by_balance);
-            if quantity <= 0 {
-                continue;
-            }
+            };
 
             if self
                 .buy_bond(
                     guild_id,
                     buyer_user_id,
                     buyer_display_name,
-                    issuance_id,
+                    issuance.id,
                     quantity,
                 )
                 .await
                 .is_ok()
             {
                 purchased += quantity as u64;
-                remaining_exposure_budget =
-                    remaining_exposure_budget.saturating_sub(price_per_bond_mana * quantity);
+                remaining_exposure_budget = remaining_exposure_budget
+                    .saturating_sub(issuance.price_per_bond_mana * quantity);
                 if remaining_exposure_budget <= 0 {
                     break;
                 }
@@ -613,6 +623,89 @@ impl BondService {
         }
 
         Ok(purchased)
+    }
+
+    #[instrument(skip(self), fields(guild_id, seller_user_id, issuance_id))]
+    pub async fn sell_bond_to_bot(
+        &self,
+        guild_id: &str,
+        seller_user_id: &str,
+        seller_display_name: &str,
+        bot_user_id: &str,
+        bot_display_name: &str,
+        issuance_id: i64,
+    ) -> AppResult<BotBondOfferOutcome> {
+        let policy = BotBondPolicy {
+            min_yield_bps: self.config.bot.min_bond_yield_bps,
+            max_yield_bps: self.config.bot.max_bond_yield_bps,
+            min_maturity_seconds: self.config.bot.min_bond_maturity_seconds,
+            max_maturity_seconds: self.config.bot.max_bond_maturity_seconds,
+            max_price_mana: self.config.bot.max_bond_price_mana,
+            max_purchase_quantity: self.config.bot.max_bond_purchase_quantity,
+            max_total_exposure_mana: self.config.bot.max_total_bond_exposure_mana,
+        };
+        if !self.config.bonds.enabled {
+            return Ok(BotBondOfferOutcome {
+                accepted: false,
+                quantity: 0,
+                reason: "bot bond buying is disabled because bonds are disabled in config".to_string(),
+                receipt: None,
+            });
+        }
+        if !self.config.bot.auto_buy_bonds {
+            return Ok(BotBondOfferOutcome {
+                accepted: false,
+                quantity: 0,
+                reason: "the bot is not buying bonds right now".to_string(),
+                receipt: None,
+            });
+        }
+
+        self.ensure_account(guild_id, seller_user_id, seller_display_name)
+            .await?;
+        self.ensure_account(guild_id, bot_user_id, bot_display_name)
+            .await?;
+
+        let mut tx = self.pool.begin().await?;
+        let issuance = self.load_open_issuance_tx(&mut tx, guild_id, issuance_id).await?;
+        drop(tx);
+
+        let current_exposure = self.open_exposure_for_holder(guild_id, bot_user_id).await?;
+        let remaining_exposure_budget =
+            policy.max_total_exposure_mana.saturating_sub(current_exposure);
+        let evaluation = self
+            .evaluate_bot_bond_purchase(
+                guild_id,
+                bot_user_id,
+                &issuance,
+                remaining_exposure_budget,
+                &policy,
+            )
+            .await?;
+        let Some(quantity) = evaluation.approved_quantity else {
+            return Ok(BotBondOfferOutcome {
+                accepted: false,
+                quantity: 0,
+                reason: evaluation.reason,
+                receipt: None,
+            });
+        };
+
+        let receipt = self
+            .buy_bond(
+                guild_id,
+                bot_user_id,
+                bot_display_name,
+                issuance_id,
+                quantity,
+            )
+            .await?;
+        Ok(BotBondOfferOutcome {
+            accepted: true,
+            quantity,
+            reason: evaluation.reason,
+            receipt: Some(receipt),
+        })
     }
 
     async fn mature_single_issuance(
@@ -931,6 +1024,114 @@ impl BondService {
         .await?;
         Ok(row.get("exposure"))
     }
+
+    async fn holder_has_open_bond_position(
+        &self,
+        guild_id: &str,
+        holder_user_id: &str,
+        issuance_id: i64,
+    ) -> AppResult<bool> {
+        Ok(sqlx::query(
+            "SELECT 1
+             FROM bond_positions
+             WHERE issuance_id = ?1 AND guild_id = ?2 AND holder_discord_user_id = ?3 AND bonds_owned > 0",
+        )
+        .bind(issuance_id)
+        .bind(guild_id)
+        .bind(holder_user_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .is_some())
+    }
+
+    async fn evaluate_bot_bond_purchase(
+        &self,
+        guild_id: &str,
+        buyer_user_id: &str,
+        issuance: &BondIssuanceRow,
+        remaining_exposure_budget: i64,
+        policy: &BotBondPolicy,
+    ) -> AppResult<BotBondEvaluation> {
+        if issuance.issuer_discord_user_id == buyer_user_id {
+            return Ok(BotBondEvaluation::reject(
+                "the bot will not buy its own bond issuance",
+            ));
+        }
+        if issuance.remaining_bonds <= 0 {
+            return Ok(BotBondEvaluation::reject("that bond issuance has no supply left"));
+        }
+        if policy.max_purchase_quantity <= 0 {
+            return Ok(BotBondEvaluation::reject("the bot is configured to buy zero bonds"));
+        }
+        if remaining_exposure_budget <= 0 {
+            return Ok(BotBondEvaluation::reject(
+                "the bot has already hit its bond exposure limit",
+            ));
+        }
+        if self
+            .holder_has_open_bond_position(guild_id, buyer_user_id, issuance.id)
+            .await?
+        {
+            return Ok(BotBondEvaluation::reject(
+                "the bot already holds this bond issuance",
+            ));
+        }
+
+        let matures_at = parse_rfc3339_utc(&issuance.matures_at)?;
+        let maturity_seconds = (matures_at - Utc::now()).num_seconds();
+        if issuance.price_per_bond_mana > policy.max_price_mana {
+            return Ok(BotBondEvaluation::reject(format!(
+                "price {} is above the bot limit of {}",
+                issuance.price_per_bond_mana, policy.max_price_mana
+            )));
+        }
+        if issuance.yield_bps < policy.min_yield_bps {
+            return Ok(BotBondEvaluation::reject(format!(
+                "yield {} bps is below the bot minimum of {} bps",
+                issuance.yield_bps, policy.min_yield_bps
+            )));
+        }
+        if issuance.yield_bps > policy.max_yield_bps {
+            return Ok(BotBondEvaluation::reject(format!(
+                "yield {} bps is above the bot maximum of {} bps",
+                issuance.yield_bps, policy.max_yield_bps
+            )));
+        }
+        if maturity_seconds < policy.min_maturity_seconds {
+            return Ok(BotBondEvaluation::reject(format!(
+                "maturity {}s is shorter than the bot minimum of {}s",
+                maturity_seconds, policy.min_maturity_seconds
+            )));
+        }
+        if maturity_seconds > policy.max_maturity_seconds {
+            return Ok(BotBondEvaluation::reject(format!(
+                "maturity {}s is longer than the bot maximum of {}s",
+                maturity_seconds, policy.max_maturity_seconds
+            )));
+        }
+
+        let affordable_by_policy = (remaining_exposure_budget / issuance.price_per_bond_mana).max(0);
+        let affordable_by_balance =
+            (self.balance(guild_id, buyer_user_id).await? / issuance.price_per_bond_mana).max(0);
+        let quantity = issuance
+            .remaining_bonds
+            .min(policy.max_purchase_quantity)
+            .min(affordable_by_policy)
+            .min(affordable_by_balance);
+        if quantity <= 0 {
+            return Ok(BotBondEvaluation::reject(
+                "the bot cannot currently afford even one bond under its balance and exposure limits",
+            ));
+        }
+
+        Ok(BotBondEvaluation {
+            approved_quantity: Some(quantity),
+            reason: format!(
+                "accepted {} bond(s) because yield, price, maturity, and exposure limits all passed",
+                quantity
+            ),
+        })
+    }
 }
 
 #[derive(sqlx::FromRow)]
@@ -948,6 +1149,20 @@ struct BondIssuanceRow {
     yield_period_seconds: i64,
     matures_at: String,
     status: String,
+}
+
+struct BotBondEvaluation {
+    approved_quantity: Option<i64>,
+    reason: String,
+}
+
+impl BotBondEvaluation {
+    fn reject(reason: impl Into<String>) -> Self {
+        Self {
+            approved_quantity: None,
+            reason: reason.into(),
+        }
+    }
 }
 
 fn compute_bond_payout_per_bond(
@@ -972,4 +1187,213 @@ fn parse_rfc3339_utc(value: &str) -> AppResult<DateTime<Utc>> {
     chrono::DateTime::parse_from_rfc3339(value)
         .map(|value| value.with_timezone(&Utc))
         .map_err(|_| AppError::Other(anyhow::anyhow!("invalid RFC3339 timestamp: {value}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use chrono::{Duration, Utc};
+    use tempfile::tempdir;
+
+    use crate::config::{
+        AppConfig, BondPolicyConfig, BotPolicyConfig, CurrencyConfig, CurrencyPosition,
+        LoanPolicyConfig, ManifoldConfig, NegativeStyle, PolicyConfig, TransferPolicyConfig,
+    };
+    use crate::db;
+    use crate::services::bond_service::CreateBondRequest;
+
+    fn test_config(cache_dir: std::path::PathBuf) -> AppConfig {
+        AppConfig {
+            discord_token: "token".to_string(),
+            cache_dir: cache_dir.clone(),
+            log_dir: cache_dir.join("logs"),
+            database_path: cache_dir.join("discord-bot.sqlite"),
+            database_url: format!(
+                "sqlite://{}",
+                cache_dir
+                    .join("discord-bot.sqlite")
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            ),
+            starting_balance: 100_000,
+            claim_amount: 10_000,
+            claim_period_seconds: 43_200,
+            claim_period_name: "twice-daily login".to_string(),
+            default_liquidity_b: 100.0,
+            share_offer_expiration_seconds: 60,
+            share_offer_cleanup_interval_seconds: 15,
+            manifold_api_base_url: "https://api.manifold.markets/v0".to_string(),
+            manifold_snapshot_ttl_seconds: 60,
+            manifold_poll_interval_seconds: 120,
+            policies: PolicyConfig {
+                starting_balance: 100_000,
+                claim_amount: 10_000,
+                claim_period_seconds: 43_200,
+                claim_period_name: "twice-daily login".to_string(),
+                default_liquidity_b: 100.0,
+                share_offer_expiration_seconds: 60,
+                share_offer_cleanup_interval_seconds: 15,
+            },
+            transfers: TransferPolicyConfig {
+                allow_money_donations: true,
+                allow_share_donations: true,
+                allow_money_offers: true,
+                allow_share_offers: true,
+                min_money_transfer: 1,
+                min_share_transfer: 0.01,
+                max_open_offers_per_user: 10,
+            },
+            loans: LoanPolicyConfig {
+                allow_money_loans: true,
+                allow_share_loans: true,
+                allow_partial_repayment: true,
+                allow_early_repayment: true,
+                allow_interest: true,
+                default_interest_bps: 0,
+                max_interest_bps: 2_500,
+                default_duration_seconds: 86_400,
+                max_duration_seconds: 2_592_000,
+                max_open_loans_per_user: 10,
+            },
+            bot: BotPolicyConfig {
+                auto_claim: true,
+                auto_accept_loans: true,
+                startup_announcement_channel_name: "bots".to_string(),
+                startup_announcement_fallback_channel_name: "general".to_string(),
+                max_loan_interest_bps: 500,
+                min_loan_duration_seconds: 3_600,
+                auto_buy_bonds: true,
+                min_bond_yield_bps: 100,
+                max_bond_yield_bps: 500,
+                min_bond_maturity_seconds: 3_600,
+                max_bond_maturity_seconds: 86_400,
+                max_bond_price_mana: 5_000,
+                max_bond_purchase_quantity: 1,
+                max_total_bond_exposure_mana: 20_000,
+                worker_interval_seconds: 60,
+            },
+            bonds: BondPolicyConfig {
+                enabled: true,
+                default_yield_period_seconds: 3_600,
+                max_yield_bps: 5_000,
+                min_maturity_seconds: 3_600,
+                max_maturity_seconds: 7_776_000,
+                max_open_issuances_per_user: 10,
+                worker_interval_seconds: 60,
+            },
+            manifold: ManifoldConfig {
+                api_base_url: "https://api.manifold.markets/v0".to_string(),
+                snapshot_ttl_seconds: 60,
+                poll_interval_seconds: 120,
+            },
+            currency: CurrencyConfig {
+                code: "MANA".to_string(),
+                display_name: "Fake Mana".to_string(),
+                singular: "mana".to_string(),
+                plural: "mana".to_string(),
+                symbol: "$".to_string(),
+                textual_symbol: "mana".to_string(),
+                emoji: "money".to_string(),
+                custom_emoji: String::new(),
+                image_symbol_path: String::new(),
+                image_symbol_url: String::new(),
+                position: CurrencyPosition::Suffix,
+                space_between: true,
+                show_symbol: false,
+                show_textual_symbol: true,
+                show_code: false,
+                use_emoji_in_embeds: true,
+                use_emoji_in_plaintext: true,
+                decimals: 0,
+                thousands_separator: ",".to_string(),
+                negative_style: NegativeStyle::Minus,
+                short_suffixes: false,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn sell_bond_to_bot_accepts_eligible_bond() {
+        let temp = tempdir().expect("tempdir");
+        let cache_dir = temp.path().join(".cache");
+        let config = Arc::new(test_config(cache_dir.clone()));
+        config.ensure_runtime_dirs().expect("dirs");
+        let pool = db::connect(&config).await.expect("pool");
+        let service = super::BondService::new(config, pool);
+
+        let receipt = service
+            .create_bond(CreateBondRequest {
+                guild_id: "guild-a".to_string(),
+                issuer_user_id: "seller".to_string(),
+                issuer_display_name: "Seller".to_string(),
+                title: "Treasury Note".to_string(),
+                description: None,
+                price_per_bond_mana: 1_000,
+                total_bonds: 3,
+                yield_bps: 400,
+                yield_period_seconds: Some(3_600),
+                matures_at: Utc::now() + Duration::hours(2),
+            })
+            .await
+            .expect("create bond");
+
+        let outcome = service
+            .sell_bond_to_bot(
+                "guild-a",
+                "seller",
+                "Seller",
+                "bot",
+                "Profit Rat",
+                receipt.issuance_id,
+            )
+            .await
+            .expect("sell to bot");
+
+        assert!(outcome.accepted);
+        assert_eq!(outcome.quantity, 1);
+        assert!(outcome.receipt.is_some());
+    }
+
+    #[tokio::test]
+    async fn sell_bond_to_bot_rejects_expensive_bond() {
+        let temp = tempdir().expect("tempdir");
+        let cache_dir = temp.path().join(".cache");
+        let config = Arc::new(test_config(cache_dir.clone()));
+        config.ensure_runtime_dirs().expect("dirs");
+        let pool = db::connect(&config).await.expect("pool");
+        let service = super::BondService::new(config, pool);
+
+        let receipt = service
+            .create_bond(CreateBondRequest {
+                guild_id: "guild-a".to_string(),
+                issuer_user_id: "seller".to_string(),
+                issuer_display_name: "Seller".to_string(),
+                title: "Too Rich For Rat".to_string(),
+                description: None,
+                price_per_bond_mana: 6_000,
+                total_bonds: 2,
+                yield_bps: 400,
+                yield_period_seconds: Some(3_600),
+                matures_at: Utc::now() + Duration::hours(2),
+            })
+            .await
+            .expect("create bond");
+
+        let outcome = service
+            .sell_bond_to_bot(
+                "guild-a",
+                "seller",
+                "Seller",
+                "bot",
+                "Profit Rat",
+                receipt.issuance_id,
+            )
+            .await
+            .expect("sell to bot");
+
+        assert!(!outcome.accepted);
+        assert_eq!(outcome.quantity, 0);
+        assert!(outcome.reason.contains("above the bot limit"));
+    }
 }
