@@ -28,6 +28,7 @@ pub async fn send_market_embed(
     extra_description: Option<String>,
 ) -> Result<(), AppError> {
     let market = &view.detail.market;
+    let config = ctx.data().config.as_ref();
     let mut description = format!(
         "{} **{}**\n**Market:** {}\n**Status:** {}\n**Type:** {}",
         market_emoji(market.market_type()),
@@ -56,20 +57,23 @@ pub async fn send_market_embed(
         .zip(view.probabilities.iter())
         .map(|(option, probability)| {
             format!(
-                "{} **{}**  •  {}  •  {}",
+                "{} **{}**\nPrice/share: {} | P(win): {} | {}\nPayout/share if correct: {} | Total payout if this wins: {}",
                 option_emoji(option.label.as_str()),
                 option.label,
+                money_decimal(config, *probability, 4),
                 percent(*probability),
-                shares(option.shares_outstanding)
+                shares(option.shares_outstanding),
+                money_decimal(config, 1.0, 4),
+                money(config, option.shares_outstanding.round() as i64),
             )
         })
         .collect::<Vec<_>>()
-        .join("\n");
+        .join("\n\n");
 
     let embed = serenity::CreateEmbed::new()
         .title(format!("{title_prefix} {}", market_id_line(market.id)))
         .description(description)
-        .field("📊 Odds Board", odds_board, false)
+        .field("Price Board", odds_board, false)
         .color(market_color(market.market_type(), market.status()));
     ctx.send(poise::CreateReply::default().embed(embed)).await?;
     Ok(())
@@ -114,10 +118,14 @@ pub fn money_plain(config: &AppConfig, amount: i64, embed_context: bool) -> Stri
 
     let space = if config.currency.space_between { " " } else { "" };
     let body = match config.currency.position {
-        CurrencyPosition::Prefix if config.currency.show_symbol && !config.currency.symbol.is_empty() => {
+        CurrencyPosition::Prefix
+            if config.currency.show_symbol && !config.currency.symbol.is_empty() =>
+        {
             format!("{}{}{}", config.currency.symbol, space, number)
         }
-        CurrencyPosition::Suffix if config.currency.show_symbol && !config.currency.symbol.is_empty() => {
+        CurrencyPosition::Suffix
+            if config.currency.show_symbol && !config.currency.symbol.is_empty() =>
+        {
             format!("{}{}{}", number, space, config.currency.symbol)
         }
         _ => format!("{}{}{}", number, space, suffix),
@@ -127,6 +135,51 @@ pub fn money_plain(config: &AppConfig, amount: i64, embed_context: bool) -> Stri
         body
     } else {
         format!("{} {}", pieces.join(" "), body)
+    }
+}
+
+pub fn money_decimal(config: &AppConfig, amount: f64, precision: usize) -> String {
+    let absolute = amount.abs();
+    let formatted = format!("{absolute:.precision$}");
+    let space = if config.currency.space_between { " " } else { "" };
+
+    let unit = if config.currency.show_code {
+        config.currency.code.as_str()
+    } else if config.currency.show_textual_symbol {
+        config.currency.textual_symbol.as_str()
+    } else if (absolute - 1.0).abs() < f64::EPSILON {
+        config.currency.singular.as_str()
+    } else {
+        config.currency.plural.as_str()
+    };
+
+    let body = match config.currency.position {
+        CurrencyPosition::Prefix
+            if config.currency.show_symbol && !config.currency.symbol.is_empty() =>
+        {
+            format!("{}{}{}", config.currency.symbol, space, formatted)
+        }
+        CurrencyPosition::Suffix
+            if config.currency.show_symbol && !config.currency.symbol.is_empty() =>
+        {
+            format!("{}{}{}", formatted, space, config.currency.symbol)
+        }
+        _ => format!("{}{}{}", formatted, space, unit),
+    };
+
+    let signed = if amount.is_sign_negative() {
+        match config.currency.negative_style {
+            NegativeStyle::Minus => format!("-{body}"),
+            NegativeStyle::Parens => format!("({body})"),
+        }
+    } else {
+        body
+    };
+
+    if config.currency.use_emoji_in_embeds && !currency_mark(config).is_empty() {
+        format!("{} {}", currency_mark(config), signed)
+    } else {
+        signed
     }
 }
 

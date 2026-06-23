@@ -6,11 +6,6 @@ use crate::bot::{Context, display_name};
 use crate::error::{AppError, AppResult};
 use crate::services::market_service::CreateMarketRequest;
 
-/// Create a native fake-money market.
-///
-/// `options` should be comma-separated like `YES,NO` or `cats,dogs,birds`.
-/// `close_time` accepts RFC3339 or simpler local formats like `2026-06-22 21:00`,
-/// `2026-06-22T21:00`, or `2026-06-22`.
 #[poise::command(slash_command)]
 pub async fn create_market(
     ctx: Context<'_>,
@@ -141,13 +136,37 @@ pub async fn market(
         AppError::Validation("markets can only be viewed inside a server".to_string())
     })?;
     let market_id = parse_market_id(&market)?;
-    let view = ctx
+    let (view, holders) = ctx
         .data()
         .services
         .markets
-        .market_view_for_guild(&guild_id.to_string(), market_id)
+        .market_holders(&guild_id.to_string(), market_id)
         .await?;
-    ui::send_market_embed(ctx, "🔎 Market View", &view, None).await?;
+
+    let extra = if holders.is_empty() {
+        Some("**Top holders**\nNo one is holding shares in this market yet.".to_string())
+    } else {
+        Some(format!(
+            "**Top holders**\n{}",
+            holders
+                .into_iter()
+                .take(5)
+                .map(|holder| format!(
+                    "{} **{}** on {} **{}** | {} | Value {} | P/L {}",
+                    ui::market_emoji(view.detail.market.market_type()),
+                    holder.display_name,
+                    ui::option_emoji(&holder.option_label),
+                    holder.option_label,
+                    ui::shares(holder.shares),
+                    ui::money(ctx.data().config.as_ref(), holder.current_value_mana),
+                    ui::money(ctx.data().config.as_ref(), holder.unrealized_pnl_mana),
+                ))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ))
+    };
+
+    ui::send_market_embed(ctx, "🔎 Market View", &view, extra).await?;
     Ok(())
 }
 
@@ -191,7 +210,7 @@ pub async fn market_holders(
         .into_iter()
         .map(|holder| {
             format!(
-                "{} **{}** • {} **{}**\nHolding {} • Value {} • P/L {}\nSpent {} • Received {}",
+                "{} **{}** | {} **{}**\nHolding {} | Value {} | P/L {}\nSpent {} | Received {}",
                 ui::market_emoji(view.detail.market.market_type()),
                 holder.display_name,
                 ui::option_emoji(&holder.option_label),
@@ -299,13 +318,34 @@ pub async fn manifold_market(
         AppError::Validation("tracked markets can only be viewed inside a server".to_string())
     })?;
     let market_id = parse_market_id(&market)?;
-    let view = ctx
+    let (view, holders) = ctx
         .data()
         .services
         .markets
-        .market_view_for_guild(&guild_id.to_string(), market_id)
+        .market_holders(&guild_id.to_string(), market_id)
         .await?;
-    ui::send_market_embed(ctx, "🛰️ Manifold View", &view, None).await?;
+    let extra = if holders.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "**Top holders**\n{}",
+            holders
+                .into_iter()
+                .take(5)
+                .map(|holder| format!(
+                    "🛰️ **{}** on {} **{}** | {} | Value {} | P/L {}",
+                    holder.display_name,
+                    ui::option_emoji(&holder.option_label),
+                    holder.option_label,
+                    ui::shares(holder.shares),
+                    ui::money(ctx.data().config.as_ref(), holder.current_value_mana),
+                    ui::money(ctx.data().config.as_ref(), holder.unrealized_pnl_mana),
+                ))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ))
+    };
+    ui::send_market_embed(ctx, "🛰️ Manifold View", &view, extra).await?;
     Ok(())
 }
 

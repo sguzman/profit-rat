@@ -1,9 +1,12 @@
 use crate::bot::commands::market::{
-    autocomplete_market_option, autocomplete_open_market, parse_market_id,
+    autocomplete_any_market, autocomplete_manifold_market, autocomplete_market_option,
+    autocomplete_open_market, parse_market_id,
 };
 use crate::bot::ui;
-use crate::bot::{Context, display_name};
+use crate::bot::{display_name, Context};
+use crate::config::AppConfig;
 use crate::error::AppError;
+use crate::services::market_service::PositionSummaryLine;
 use crate::services::trading_service::{BuyRequest, CreateShareOfferRequest, SellRequest};
 use poise::serenity_prelude as serenity;
 
@@ -40,18 +43,10 @@ pub async fn buy(
         ctx,
         "🛒 Position Bought",
         format!(
-            "**Market:** {} **#{}**\n**Source:** {}\n**Option:** {} **{}**\n**Spent:** {}\n**Received:** {}\n**Price move:** {} → {}\n**Balance:** {}",
-            if receipt.market_type == "manifold" {
-                "🛰️"
-            } else {
-                "📈"
-            },
+            "**Market:** {} **#{}**\n**Source:** {}\n**Option:** {} **{}**\n**Spent:** {}\n**Received:** {}\n**Price move:** {} -> {}\n**Balance:** {}",
+            market_type_emoji(&receipt.market_type),
             receipt.market_id,
-            if receipt.market_type == "manifold" {
-                "🛰️ **Manifold Mirror**"
-            } else {
-                "🐀 **Native Rat Market**"
-            },
+            market_type_label(&receipt.market_type),
             ui::option_emoji(&receipt.option_label),
             receipt.option_label,
             ui::money(config, receipt.mana_amount),
@@ -60,7 +55,7 @@ pub async fn buy(
             ui::percent(receipt.price_after),
             ui::money(config, receipt.balance_mana)
         ),
-        poise::serenity_prelude::Colour::from_rgb(46, 204, 113),
+        serenity::Colour::from_rgb(46, 204, 113),
     )
     .await?;
     Ok(())
@@ -99,18 +94,10 @@ pub async fn sell(
         ctx,
         "💸 Position Sold",
         format!(
-            "**Market:** {} **#{}**\n**Source:** {}\n**Option:** {} **{}**\n**Received:** {}\n**Shares sold:** {}\n**Price move:** {} → {}\n**Balance:** {}",
-            if receipt.market_type == "manifold" {
-                "🛰️"
-            } else {
-                "📈"
-            },
+            "**Market:** {} **#{}**\n**Source:** {}\n**Option:** {} **{}**\n**Received:** {}\n**Shares sold:** {}\n**Price move:** {} -> {}\n**Balance:** {}",
+            market_type_emoji(&receipt.market_type),
             receipt.market_id,
-            if receipt.market_type == "manifold" {
-                "🛰️ **Manifold Mirror**"
-            } else {
-                "🐀 **Native Rat Market**"
-            },
+            market_type_label(&receipt.market_type),
             ui::option_emoji(&receipt.option_label),
             receipt.option_label,
             ui::money(config, receipt.mana_amount),
@@ -119,7 +106,7 @@ pub async fn sell(
             ui::percent(receipt.price_after),
             ui::money(config, receipt.balance_mana)
         ),
-        poise::serenity_prelude::Colour::from_rgb(52, 152, 219),
+        serenity::Colour::from_rgb(52, 152, 219),
     )
     .await?;
     Ok(())
@@ -164,11 +151,7 @@ pub async fn offer_shares(
         format!(
             "**Offer:** **#{}**\n**Market:** {} **#{}**\n**Option:** {} **{}**\n**Buyer:** <@{}> (**{}**)\n**Shares:** {}\n**Price:** {}\n**Expires:** {}",
             receipt.offer_id,
-            if receipt.market_type == "manifold" {
-                "🛰️"
-            } else {
-                "📈"
-            },
+            market_type_emoji(&receipt.market_type),
             receipt.market_id,
             ui::option_emoji(&receipt.option_label),
             receipt.option_label,
@@ -178,7 +161,7 @@ pub async fn offer_shares(
             ui::money(ctx.data().config.as_ref(), receipt.price_mana),
             ui::discord_timestamp(receipt.expires_at)
         ),
-        poise::serenity_prelude::Colour::from_rgb(230, 126, 34),
+        serenity::Colour::from_rgb(230, 126, 34),
     )
     .await?;
     Ok(())
@@ -200,7 +183,7 @@ pub async fn incoming_share_offers(ctx: Context<'_>) -> Result<(), AppError> {
             ctx,
             "📨 Incoming Offers",
             "No pending share offers are waiting on you right now.",
-            poise::serenity_prelude::Colour::from_rgb(127, 140, 141),
+            serenity::Colour::from_rgb(127, 140, 141),
         )
         .await?;
         return Ok(());
@@ -230,7 +213,7 @@ pub async fn incoming_share_offers(ctx: Context<'_>) -> Result<(), AppError> {
         ctx,
         "📨 Incoming Offers",
         body,
-        poise::serenity_prelude::Colour::from_rgb(52, 152, 219),
+        serenity::Colour::from_rgb(52, 152, 219),
     )
     .await?;
     Ok(())
@@ -265,11 +248,7 @@ pub async fn accept_share_offer(
         format!(
             "**Offer:** **#{}**\n**Market:** {} **#{}**\n**Seller:** **{}**\n**Option:** {} **{}**\n**Shares:** {}\n**Paid:** {}\n**New balance:** {}\n**Offer expired at:** {}",
             receipt.offer_id,
-            if receipt.market_type == "manifold" {
-                "🛰️"
-            } else {
-                "📈"
-            },
+            market_type_emoji(&receipt.market_type),
             receipt.market_id,
             receipt.counterparty_display_name,
             ui::option_emoji(&receipt.option_label),
@@ -279,7 +258,7 @@ pub async fn accept_share_offer(
             ui::money(config, receipt.buyer_balance_mana.unwrap_or(0)),
             ui::discord_timestamp(receipt.expires_at)
         ),
-        poise::serenity_prelude::Colour::from_rgb(46, 204, 113),
+        serenity::Colour::from_rgb(46, 204, 113),
     )
     .await?;
     Ok(())
@@ -308,11 +287,7 @@ pub async fn decline_share_offer(
         format!(
             "**Offer:** **#{}**\n**Market:** {} **#{}**\n**Seller:** **{}**\n**Option:** {} **{}**\n**Shares:** {}\n**Price:** {}\n**Status:** **{}**\n**Would have expired at:** {}",
             receipt.offer_id,
-            if receipt.market_type == "manifold" {
-                "🛰️"
-            } else {
-                "📈"
-            },
+            market_type_emoji(&receipt.market_type),
             receipt.market_id,
             receipt.counterparty_display_name,
             ui::option_emoji(&receipt.option_label),
@@ -322,7 +297,7 @@ pub async fn decline_share_offer(
             receipt.status,
             ui::discord_timestamp(receipt.expires_at)
         ),
-        poise::serenity_prelude::Colour::from_rgb(231, 76, 60),
+        serenity::Colour::from_rgb(231, 76, 60),
     )
     .await?;
     Ok(())
@@ -331,23 +306,30 @@ pub async fn decline_share_offer(
 #[poise::command(slash_command)]
 pub async fn positions(
     ctx: Context<'_>,
-    #[description = "Optional market filter"] market_id: Option<i64>,
+    #[description = "Optional market filter"]
+    #[autocomplete = "autocomplete_any_market"]
+    market: Option<String>,
 ) -> Result<(), AppError> {
     let guild_id = ctx.guild_id().ok_or_else(|| {
         AppError::Validation("positions only exist inside a server economy".to_string())
     })?;
+    let market_id = market.as_deref().map(parse_market_id).transpose()?;
     let positions = ctx
         .data()
         .services
         .markets
-        .positions_for_user(&guild_id.to_string(), &ctx.author().id.to_string(), market_id)
+        .position_summaries_for_user(
+            &guild_id.to_string(),
+            &ctx.author().id.to_string(),
+            market_id,
+        )
         .await?;
     if positions.is_empty() {
         ui::send_embed(
             ctx,
             "📦 Your Positions",
             "You do not hold any positions for that filter yet.",
-            poise::serenity_prelude::Colour::from_rgb(127, 140, 141),
+            serenity::Colour::from_rgb(127, 140, 141),
         )
         .await?;
         return Ok(());
@@ -356,36 +338,14 @@ pub async fn positions(
     let config = ctx.data().config.as_ref();
     let body = positions
         .into_iter()
-        .map(|(position, market, option)| {
-            format!(
-                "{} **#{}** {}\n{} **{}** → {}\nSpent {} • Received {}",
-                if market.market_type == "manifold" {
-                    "🛰️"
-                } else {
-                    "📈"
-                },
-                market.id,
-                market.question,
-                match market.status.as_str() {
-                    "open" => "🟢",
-                    "settled" => "💸",
-                    "resolved" => "🔨",
-                    "cancelled" => "⚫",
-                    _ => "🟡",
-                },
-                option.label,
-                ui::shares(position.shares),
-                ui::money(config, position.total_spent_mana),
-                ui::money(config, position.total_received_mana)
-            )
-        })
+        .map(|position| format_position_summary(config, &position))
         .collect::<Vec<_>>()
         .join("\n\n");
     ui::send_embed(
         ctx,
         "📦 Your Positions",
         body,
-        poise::serenity_prelude::Colour::from_rgb(155, 89, 182),
+        serenity::Colour::from_rgb(155, 89, 182),
     )
     .await?;
     Ok(())
@@ -394,26 +354,33 @@ pub async fn positions(
 #[poise::command(slash_command)]
 pub async fn mpositions(
     ctx: Context<'_>,
-    #[description = "Optional tracked market filter"] market_id: Option<i64>,
+    #[description = "Optional tracked market filter"]
+    #[autocomplete = "autocomplete_manifold_market"]
+    market: Option<String>,
 ) -> Result<(), AppError> {
     let guild_id = ctx.guild_id().ok_or_else(|| {
         AppError::Validation("positions only exist inside a server economy".to_string())
     })?;
+    let market_id = market.as_deref().map(parse_market_id).transpose()?;
     let positions = ctx
         .data()
         .services
         .markets
-        .positions_for_user(&guild_id.to_string(), &ctx.author().id.to_string(), market_id)
+        .position_summaries_for_user(
+            &guild_id.to_string(),
+            &ctx.author().id.to_string(),
+            market_id,
+        )
         .await?
         .into_iter()
-        .filter(|(_, market, _)| market.market_type == "manifold")
+        .filter(|position| position.market_type == "manifold")
         .collect::<Vec<_>>();
     if positions.is_empty() {
         ui::send_embed(
             ctx,
             "🛰️ Mirror Positions",
             "You do not hold any Manifold-tracked positions for that filter yet.",
-            poise::serenity_prelude::Colour::from_rgb(127, 140, 141),
+            serenity::Colour::from_rgb(127, 140, 141),
         )
         .await?;
         return Ok(());
@@ -422,31 +389,14 @@ pub async fn mpositions(
     let config = ctx.data().config.as_ref();
     let body = positions
         .into_iter()
-        .map(|(position, market, option)| {
-            format!(
-                "🛰️ **#{}** {}\n{} **{}** → {}\nSpent {} • Received {}",
-                market.id,
-                market.question,
-                match market.status.as_str() {
-                    "open" => "🟢",
-                    "settled" => "💸",
-                    "resolved" => "🔨",
-                    "cancelled" => "⚫",
-                    _ => "🟡",
-                },
-                option.label,
-                ui::shares(position.shares),
-                ui::money(config, position.total_spent_mana),
-                ui::money(config, position.total_received_mana)
-            )
-        })
+        .map(|position| format_position_summary(config, &position))
         .collect::<Vec<_>>()
         .join("\n\n");
     ui::send_embed(
         ctx,
         "🛰️ Mirror Positions",
         body,
-        poise::serenity_prelude::Colour::from_rgb(26, 188, 156),
+        serenity::Colour::from_rgb(26, 188, 156),
     )
     .await?;
     Ok(())
@@ -463,7 +413,12 @@ async fn autocomplete_incoming_share_offer(
     ctx.data()
         .services
         .trading
-        .autocomplete_incoming_share_offers(&guild_id.to_string(), &ctx.author().id.to_string(), partial, 20)
+        .autocomplete_incoming_share_offers(
+            &guild_id.to_string(),
+            &ctx.author().id.to_string(),
+            partial,
+            20,
+        )
         .await
         .unwrap_or_default()
 }
@@ -475,4 +430,50 @@ fn parse_offer_id(value: &str) -> Result<i64, AppError> {
                 .to_string(),
         )
     })
+}
+
+fn format_position_summary(config: &AppConfig, position: &PositionSummaryLine) -> String {
+    format!(
+        "{} **#{}** {}\n{} {} **{}**\nYou hold {} | Market total {}\nPrice/share {} | Payout if correct {}\nValue {} | P/L {}\n1h {} | 24h {}\nSpent {} | Received {}",
+        market_type_emoji(&position.market_type),
+        position.market_id,
+        position.market_question,
+        market_status_badge(&position.market_status),
+        ui::option_emoji(&position.option_label),
+        position.option_label,
+        ui::shares(position.shares),
+        ui::shares(position.market_total_shares),
+        ui::money_decimal(config, position.current_price, 4),
+        ui::money(config, position.payout_if_correct_mana),
+        ui::money(config, position.current_value_mana),
+        ui::money(config, position.unrealized_pnl_mana),
+        ui::money(config, position.pnl_change_1h_mana),
+        ui::money(config, position.pnl_change_24h_mana),
+        ui::money(config, position.total_spent_mana),
+        ui::money(config, position.total_received_mana),
+    )
+}
+
+fn market_type_emoji(market_type: &str) -> &'static str {
+    match market_type {
+        "manifold" => "🛰️",
+        _ => "📈",
+    }
+}
+
+fn market_type_label(market_type: &str) -> &'static str {
+    match market_type {
+        "manifold" => "🛰️ **Manifold Mirror**",
+        _ => "🐀 **Native Rat Market**",
+    }
+}
+
+fn market_status_badge(status: &str) -> &'static str {
+    match status {
+        "open" => "🟢",
+        "settled" => "💸",
+        "resolved" => "🔨",
+        "cancelled" => "⚫",
+        _ => "🟡",
+    }
 }

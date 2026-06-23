@@ -40,6 +40,25 @@ pub struct MarketView {
 }
 
 #[derive(Clone, Debug)]
+pub struct PositionSummaryLine {
+    pub market_id: i64,
+    pub market_question: String,
+    pub market_type: String,
+    pub market_status: String,
+    pub option_label: String,
+    pub shares: f64,
+    pub market_total_shares: f64,
+    pub total_spent_mana: i64,
+    pub total_received_mana: i64,
+    pub current_price: f64,
+    pub current_value_mana: i64,
+    pub unrealized_pnl_mana: i64,
+    pub payout_if_correct_mana: i64,
+    pub pnl_change_1h_mana: i64,
+    pub pnl_change_24h_mana: i64,
+}
+
+#[derive(Clone, Debug)]
 pub struct ListMarketsItem {
     pub id: i64,
     pub question: String,
@@ -628,6 +647,76 @@ impl MarketService {
         Ok(out)
     }
 
+    #[instrument(skip(self), fields(guild_id, discord_user_id))]
+    pub async fn position_summaries_for_user(
+        &self,
+        guild_id: &str,
+        discord_user_id: &str,
+        market_id: Option<i64>,
+    ) -> AppResult<Vec<PositionSummaryLine>> {
+        let raw_positions = self
+            .positions_for_user(guild_id, discord_user_id, market_id)
+            .await?;
+        let mut grouped_totals = HashMap::<i64, f64>::new();
+        for (position, _, _) in &raw_positions {
+            *grouped_totals.entry(position.market_id).or_insert(0.0) += position.shares;
+        }
+
+        let mut market_views = HashMap::<i64, MarketView>::new();
+        let mut summaries = Vec::with_capacity(raw_positions.len());
+        for (position, market, option) in raw_positions {
+            let view = if let Some(existing) = market_views.get(&market.id) {
+                existing.clone()
+            } else {
+                let created = self.market_view(market.id).await?;
+                market_views.insert(market.id, created.clone());
+                created
+            };
+
+            let option_index = view
+                .detail
+                .options
+                .iter()
+                .position(|candidate| candidate.id == option.id)
+                .ok_or_else(|| AppError::NotFound("position option is missing".to_string()))?;
+            let current_price = view.probabilities[option_index];
+            let current_value_mana = (position.shares * current_price).round() as i64;
+            let unrealized_pnl_mana =
+                current_value_mana + position.total_received_mana - position.total_spent_mana;
+            let hour_cutoff = Utc::now() - chrono::Duration::hours(1);
+            let day_cutoff = Utc::now() - chrono::Duration::hours(24);
+            let price_1h = self
+                .historical_option_price(market.id, option.id, market.market_type(), current_price, hour_cutoff)
+                .await?;
+            let price_24h = self
+                .historical_option_price(market.id, option.id, market.market_type(), current_price, day_cutoff)
+                .await?;
+
+            summaries.push(PositionSummaryLine {
+                market_id: market.id,
+                market_question: market.question,
+                market_type: market.market_type,
+                market_status: market.status,
+                option_label: option.label,
+                shares: position.shares,
+                market_total_shares: grouped_totals
+                    .get(&position.market_id)
+                    .copied()
+                    .unwrap_or(position.shares),
+                total_spent_mana: position.total_spent_mana,
+                total_received_mana: position.total_received_mana,
+                current_price,
+                current_value_mana,
+                unrealized_pnl_mana,
+                payout_if_correct_mana: position.shares.round() as i64,
+                pnl_change_1h_mana: (position.shares * (current_price - price_1h)).round() as i64,
+                pnl_change_24h_mana: (position.shares * (current_price - price_24h)).round() as i64,
+            });
+        }
+
+        Ok(summaries)
+    }
+
     #[instrument(skip(self), fields(guild_id, market_id))]
     pub async fn market_holders(
         &self,
@@ -889,6 +978,40 @@ impl MarketService {
         .fetch_one(&self.pool)
         .await?;
         Ok(row.get("total"))
+    }
+
+    async fn historical_option_price(
+        &self,
+        market_id: i64,
+        option_id: i64,
+        market_type: MarketType,
+        fallback_price: f64,
+        cutoff: DateTime<Utc>,
+    ) -> AppResult<f64> {
+        let row = sqlx::query(
+            "SELECT price_after, external_price_at_trade
+             FROM trades
+             WHERE market_id = ?1
+               AND option_id = ?2
+               AND created_at <= ?3
+             ORDER BY created_at DESC, id DESC
+             LIMIT 1",
+        )
+        .bind(market_id)
+        .bind(option_id)
+        .bind(cutoff.to_rfc3339())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let price = row
+            .map(|row| match market_type {
+                MarketType::Native => row.get::<f64, _>("price_after"),
+                MarketType::Manifold => row
+                    .get::<Option<f64>, _>("external_price_at_trade")
+                    .unwrap_or_else(|| row.get::<f64, _>("price_after")),
+            })
+            .unwrap_or(fallback_price);
+        Ok(price)
     }
 
     fn ensure_market_belongs_to_guild(
