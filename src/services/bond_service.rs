@@ -495,6 +495,126 @@ impl BondService {
         Ok(matured)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    #[instrument(skip(self), fields(guild_id, buyer_user_id))]
+    pub async fn auto_buy_eligible_bonds(
+        &self,
+        guild_id: &str,
+        buyer_user_id: &str,
+        buyer_display_name: &str,
+        min_yield_bps: i64,
+        max_yield_bps: i64,
+        min_maturity_seconds: i64,
+        max_maturity_seconds: i64,
+        max_price_mana: i64,
+        max_purchase_quantity: i64,
+        max_total_exposure_mana: i64,
+    ) -> AppResult<u64> {
+        if !self.config.bonds.enabled || max_purchase_quantity <= 0 {
+            return Ok(0);
+        }
+        self.ensure_account(guild_id, buyer_user_id, buyer_display_name)
+            .await?;
+
+        let current_exposure = self
+            .open_exposure_for_holder(guild_id, buyer_user_id)
+            .await?;
+        if current_exposure >= max_total_exposure_mana {
+            return Ok(0);
+        }
+
+        let rows = sqlx::query(
+            "SELECT
+                id,
+                issuer_discord_user_id,
+                title,
+                price_per_bond_mana,
+                payout_per_bond_mana,
+                remaining_bonds,
+                yield_bps,
+                yield_period_seconds,
+                matures_at
+             FROM bond_issuances
+             WHERE guild_id = ?1 AND status = 'open'
+             ORDER BY matures_at ASC, id ASC",
+        )
+        .bind(guild_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut purchased = 0;
+        let mut remaining_exposure_budget = max_total_exposure_mana - current_exposure;
+        for row in rows {
+            let issuance_id = row.get::<i64, _>("id");
+            let issuer_user_id = row.get::<String, _>("issuer_discord_user_id");
+            if issuer_user_id == buyer_user_id {
+                continue;
+            }
+
+            let existing_position = sqlx::query(
+                "SELECT 1
+                 FROM bond_positions
+                 WHERE issuance_id = ?1 AND guild_id = ?2 AND holder_discord_user_id = ?3 AND bonds_owned > 0",
+            )
+            .bind(issuance_id)
+            .bind(guild_id)
+            .bind(buyer_user_id)
+            .fetch_optional(&self.pool)
+            .await?;
+            if existing_position.is_some() {
+                continue;
+            }
+
+            let price_per_bond_mana = row.get::<i64, _>("price_per_bond_mana");
+            let yield_bps = row.get::<i64, _>("yield_bps");
+            let remaining_bonds = row.get::<i64, _>("remaining_bonds");
+            let matures_at = parse_rfc3339_utc(&row.get::<String, _>("matures_at"))?;
+            let maturity_seconds = (matures_at - Utc::now()).num_seconds();
+
+            if price_per_bond_mana > max_price_mana
+                || yield_bps < min_yield_bps
+                || yield_bps > max_yield_bps
+                || maturity_seconds < min_maturity_seconds
+                || maturity_seconds > max_maturity_seconds
+                || remaining_bonds <= 0
+            {
+                continue;
+            }
+
+            let affordable_by_policy = (remaining_exposure_budget / price_per_bond_mana).max(0);
+            let affordable_by_balance =
+                (self.balance(guild_id, buyer_user_id).await? / price_per_bond_mana).max(0);
+            let quantity = remaining_bonds
+                .min(max_purchase_quantity)
+                .min(affordable_by_policy)
+                .min(affordable_by_balance);
+            if quantity <= 0 {
+                continue;
+            }
+
+            if self
+                .buy_bond(
+                    guild_id,
+                    buyer_user_id,
+                    buyer_display_name,
+                    issuance_id,
+                    quantity,
+                )
+                .await
+                .is_ok()
+            {
+                purchased += quantity as u64;
+                remaining_exposure_budget =
+                    remaining_exposure_budget.saturating_sub(price_per_bond_mana * quantity);
+                if remaining_exposure_budget <= 0 {
+                    break;
+                }
+            }
+        }
+
+        Ok(purchased)
+    }
+
     async fn mature_single_issuance(
         &self,
         guild_id: &str,
@@ -793,6 +913,23 @@ impl BondService {
         .fetch_one(&self.pool)
         .await?;
         Ok(row.get("remaining_bonds"))
+    }
+
+    async fn open_exposure_for_holder(&self, guild_id: &str, holder_user_id: &str) -> AppResult<i64> {
+        let row = sqlx::query(
+            "SELECT COALESCE(SUM(p.total_spent_mana), 0) AS exposure
+             FROM bond_positions p
+             JOIN bond_issuances b ON b.id = p.issuance_id
+             WHERE p.guild_id = ?1
+               AND p.holder_discord_user_id = ?2
+               AND p.bonds_owned > 0
+               AND b.status = 'open'",
+        )
+        .bind(guild_id)
+        .bind(holder_user_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.get("exposure"))
     }
 }
 

@@ -1106,7 +1106,7 @@ impl SocialService {
         guild_id: &str,
         borrower_user_id: &str,
         borrower_display_name: &str,
-        required_interest_bps: i64,
+        max_interest_bps: i64,
         min_duration_seconds: i64,
     ) -> AppResult<u64> {
         self.expire_pending_loans().await?;
@@ -1132,10 +1132,7 @@ impl SocialService {
             let due_at = parse_rfc3339_utc(&row.get::<String, _>("due_at"))?;
             let duration_seconds = (due_at - created_at).num_seconds();
 
-            if asset_type != "money"
-                || interest_bps != required_interest_bps
-                || duration_seconds < min_duration_seconds
-            {
+            if asset_type != "money" || interest_bps > max_interest_bps || duration_seconds < min_duration_seconds {
                 continue;
             }
 

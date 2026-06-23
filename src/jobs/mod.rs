@@ -145,7 +145,7 @@ pub fn spawn_bot_behavior_jobs(
                             guild_id,
                             &behavior_bot_user_id,
                             &behavior_bot_display_name,
-                            behavior_config.bot.loan_required_interest_bps,
+                            behavior_config.bot.max_loan_interest_bps,
                             behavior_config.bot.min_loan_duration_seconds,
                         )
                         .await
@@ -153,12 +153,42 @@ pub fn spawn_bot_behavior_jobs(
                         Ok(accepted) if accepted > 0 => info!(
                             guild_id,
                             accepted,
-                            required_interest_bps = behavior_config.bot.loan_required_interest_bps,
+                            max_interest_bps = behavior_config.bot.max_loan_interest_bps,
                             min_duration_seconds = behavior_config.bot.min_loan_duration_seconds,
                             "bot auto-accepted eligible loans"
                         ),
                         Ok(_) => {}
                         Err(error) => error!(guild_id, %error, "bot auto-loan acceptance failed"),
+                    }
+                }
+
+                if behavior_config.bot.auto_buy_bonds {
+                    match behavior_services
+                        .bonds
+                        .auto_buy_eligible_bonds(
+                            guild_id,
+                            &behavior_bot_user_id,
+                            &behavior_bot_display_name,
+                            behavior_config.bot.min_bond_yield_bps,
+                            behavior_config.bot.max_bond_yield_bps,
+                            behavior_config.bot.min_bond_maturity_seconds,
+                            behavior_config.bot.max_bond_maturity_seconds,
+                            behavior_config.bot.max_bond_price_mana,
+                            behavior_config.bot.max_bond_purchase_quantity,
+                            behavior_config.bot.max_total_bond_exposure_mana,
+                        )
+                        .await
+                    {
+                        Ok(purchased) if purchased > 0 => info!(
+                            guild_id,
+                            purchased,
+                            min_yield_bps = behavior_config.bot.min_bond_yield_bps,
+                            max_yield_bps = behavior_config.bot.max_bond_yield_bps,
+                            max_price_mana = behavior_config.bot.max_bond_price_mana,
+                            "bot auto-bought eligible bonds"
+                        ),
+                        Ok(_) => {}
+                        Err(error) => error!(guild_id, %error, "bot auto-bond buying failed"),
                     }
                 }
             }

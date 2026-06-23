@@ -309,8 +309,16 @@ mod tests {
             bot: BotPolicyConfig {
                 auto_claim: true,
                 auto_accept_loans: true,
-                loan_required_interest_bps: 500,
+                max_loan_interest_bps: 500,
                 min_loan_duration_seconds: 3_600,
+                auto_buy_bonds: true,
+                min_bond_yield_bps: 100,
+                max_bond_yield_bps: 500,
+                min_bond_maturity_seconds: 3_600,
+                max_bond_maturity_seconds: 86_400,
+                max_bond_price_mana: 5_000,
+                max_bond_purchase_quantity: 1,
+                max_total_bond_exposure_mana: 20_000,
                 worker_interval_seconds: 60,
             },
             bonds: BondPolicyConfig {

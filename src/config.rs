@@ -75,8 +75,16 @@ pub struct LoanPolicyConfig {
 pub struct BotPolicyConfig {
     pub auto_claim: bool,
     pub auto_accept_loans: bool,
-    pub loan_required_interest_bps: i64,
+    pub max_loan_interest_bps: i64,
     pub min_loan_duration_seconds: i64,
+    pub auto_buy_bonds: bool,
+    pub min_bond_yield_bps: i64,
+    pub max_bond_yield_bps: i64,
+    pub min_bond_maturity_seconds: i64,
+    pub max_bond_maturity_seconds: i64,
+    pub max_bond_price_mana: i64,
+    pub max_bond_purchase_quantity: i64,
+    pub max_total_bond_exposure_mana: i64,
     pub worker_interval_seconds: i64,
 }
 
@@ -233,8 +241,19 @@ impl AppConfig {
         let bot = BotPolicyConfig {
             auto_claim: merged.bot.auto_claim.unwrap_or(true),
             auto_accept_loans: merged.bot.auto_accept_loans.unwrap_or(true),
-            loan_required_interest_bps: merged.bot.loan_required_interest_bps.unwrap_or(500),
+            max_loan_interest_bps: merged.bot.max_loan_interest_bps.unwrap_or(500),
             min_loan_duration_seconds: merged.bot.min_loan_duration_seconds.unwrap_or(3_600),
+            auto_buy_bonds: merged.bot.auto_buy_bonds.unwrap_or(true),
+            min_bond_yield_bps: merged.bot.min_bond_yield_bps.unwrap_or(100),
+            max_bond_yield_bps: merged.bot.max_bond_yield_bps.unwrap_or(500),
+            min_bond_maturity_seconds: merged.bot.min_bond_maturity_seconds.unwrap_or(3_600),
+            max_bond_maturity_seconds: merged.bot.max_bond_maturity_seconds.unwrap_or(86_400),
+            max_bond_price_mana: merged.bot.max_bond_price_mana.unwrap_or(5_000),
+            max_bond_purchase_quantity: merged.bot.max_bond_purchase_quantity.unwrap_or(1),
+            max_total_bond_exposure_mana: merged
+                .bot
+                .max_total_bond_exposure_mana
+                .unwrap_or(20_000),
             worker_interval_seconds: merged.bot.worker_interval_seconds.unwrap_or(60),
         };
 
@@ -584,9 +603,25 @@ struct PartialBotPolicyConfig {
     #[serde(default)]
     auto_accept_loans: Option<bool>,
     #[serde(default)]
-    loan_required_interest_bps: Option<i64>,
+    max_loan_interest_bps: Option<i64>,
     #[serde(default)]
     min_loan_duration_seconds: Option<i64>,
+    #[serde(default)]
+    auto_buy_bonds: Option<bool>,
+    #[serde(default)]
+    min_bond_yield_bps: Option<i64>,
+    #[serde(default)]
+    max_bond_yield_bps: Option<i64>,
+    #[serde(default)]
+    min_bond_maturity_seconds: Option<i64>,
+    #[serde(default)]
+    max_bond_maturity_seconds: Option<i64>,
+    #[serde(default)]
+    max_bond_price_mana: Option<i64>,
+    #[serde(default)]
+    max_bond_purchase_quantity: Option<i64>,
+    #[serde(default)]
+    max_total_bond_exposure_mana: Option<i64>,
     #[serde(default)]
     worker_interval_seconds: Option<i64>,
 }
@@ -596,12 +631,28 @@ impl PartialBotPolicyConfig {
         Self {
             auto_claim: overlay.auto_claim.or(self.auto_claim),
             auto_accept_loans: overlay.auto_accept_loans.or(self.auto_accept_loans),
-            loan_required_interest_bps: overlay
-                .loan_required_interest_bps
-                .or(self.loan_required_interest_bps),
+            max_loan_interest_bps: overlay
+                .max_loan_interest_bps
+                .or(self.max_loan_interest_bps),
             min_loan_duration_seconds: overlay
                 .min_loan_duration_seconds
                 .or(self.min_loan_duration_seconds),
+            auto_buy_bonds: overlay.auto_buy_bonds.or(self.auto_buy_bonds),
+            min_bond_yield_bps: overlay.min_bond_yield_bps.or(self.min_bond_yield_bps),
+            max_bond_yield_bps: overlay.max_bond_yield_bps.or(self.max_bond_yield_bps),
+            min_bond_maturity_seconds: overlay
+                .min_bond_maturity_seconds
+                .or(self.min_bond_maturity_seconds),
+            max_bond_maturity_seconds: overlay
+                .max_bond_maturity_seconds
+                .or(self.max_bond_maturity_seconds),
+            max_bond_price_mana: overlay.max_bond_price_mana.or(self.max_bond_price_mana),
+            max_bond_purchase_quantity: overlay
+                .max_bond_purchase_quantity
+                .or(self.max_bond_purchase_quantity),
+            max_total_bond_exposure_mana: overlay
+                .max_total_bond_exposure_mana
+                .or(self.max_total_bond_exposure_mana),
             worker_interval_seconds: overlay
                 .worker_interval_seconds
                 .or(self.worker_interval_seconds),
@@ -791,8 +842,16 @@ mod tests {
             bot: BotPolicyConfig {
                 auto_claim: true,
                 auto_accept_loans: true,
-                loan_required_interest_bps: 500,
+                max_loan_interest_bps: 500,
                 min_loan_duration_seconds: 3_600,
+                auto_buy_bonds: true,
+                min_bond_yield_bps: 100,
+                max_bond_yield_bps: 500,
+                min_bond_maturity_seconds: 3_600,
+                max_bond_maturity_seconds: 86_400,
+                max_bond_price_mana: 5_000,
+                max_bond_purchase_quantity: 1,
+                max_total_bond_exposure_mana: 20_000,
                 worker_interval_seconds: 60,
             },
             bonds: BondPolicyConfig {
