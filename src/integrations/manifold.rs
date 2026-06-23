@@ -91,9 +91,7 @@ impl ManifoldClient {
             Some("CANCEL") => Some(ExternalResolution::Cancelled),
             Some(other) => {
                 if let Some(answer) = raw.answers.as_ref().and_then(|answers| {
-                    answers
-                        .iter()
-                        .find(|answer| answer.number.to_string() == other || answer.id == other)
+                    answers.iter().find(|answer| answer_matches_resolution(answer, other))
                 }) {
                     Some(ExternalResolution::MultipleChoice {
                         winning_outcome_id: answer.id.clone(),
@@ -223,13 +221,26 @@ struct ManifoldMarket {
 struct ManifoldAnswer {
     id: String,
     text: String,
-    number: i64,
+    number: Option<i64>,
+    index: Option<i64>,
     probability: Option<f64>,
+}
+
+fn answer_matches_resolution(answer: &ManifoldAnswer, resolution: &str) -> bool {
+    answer.id == resolution
+        || answer
+            .number
+            .map(|number| number.to_string() == resolution)
+            .unwrap_or(false)
+        || answer
+            .index
+            .map(|index| index.to_string() == resolution)
+            .unwrap_or(false)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::extract_slug_candidate;
+    use super::{ManifoldMarket, extract_slug_candidate};
 
     #[test]
     fn extracts_slug_from_full_market_url() {
@@ -252,5 +263,28 @@ mod tests {
     #[test]
     fn does_not_treat_bare_id_as_slug() {
         assert_eq!(extract_slug_candidate("QOUnZl2nNU"), None);
+    }
+
+    #[test]
+    fn decodes_multiple_choice_answers_with_index_only() {
+        let payload = r#"{
+            "id":"lgU5yu2llq",
+            "question":"POR vs UZB",
+            "url":"https://manifold.markets/ManifoldSports/por-vs-uzb-world-cup-26",
+            "slug":"por-vs-uzb-world-cup-26",
+            "outcomeType":"MULTIPLE_CHOICE",
+            "isResolved":false,
+            "answers":[
+                {"id":"5UNgPhz2UU","index":0,"text":"Portugal","probability":0.87},
+                {"id":"IgtQcstS00","index":1,"text":"Uzbekistan","probability":0.04},
+                {"id":"8QS0tN68Np","index":2,"text":"Draw","probability":0.09}
+            ]
+        }"#;
+
+        let decoded = serde_json::from_str::<ManifoldMarket>(payload).expect("payload should decode");
+        let answers = decoded.answers.expect("answers should exist");
+        assert_eq!(answers.len(), 3);
+        assert_eq!(answers[0].index, Some(0));
+        assert_eq!(answers[0].number, None);
     }
 }
