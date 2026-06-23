@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use poise::serenity_prelude as serenity;
 
 use crate::bot::ui;
-use crate::bot::{display_name, Context};
+use crate::bot::{Context, display_name};
 use crate::error::AppError;
 
 #[poise::command(slash_command)]
@@ -93,7 +93,10 @@ pub async fn claim_info(ctx: Context<'_>) -> Result<(), AppError> {
     let config = ctx.data().config.as_ref();
     let readiness = match summary.next_claim_at {
         Some(value) if value > Utc::now() => {
-            format!("**Status:** Cooling down\n**Next claim:** {}", discord_timestamp(value))
+            format!(
+                "**Status:** Cooling down\n**Next claim:** {}",
+                discord_timestamp(value)
+            )
         }
         _ => "**Status:** Ready now\n**Next claim:** Right now".to_string(),
     };

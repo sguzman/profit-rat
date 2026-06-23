@@ -1,6 +1,8 @@
 use poise::serenity_prelude as serenity;
 
-use crate::bot::commands::market::{autocomplete_market_option, autocomplete_open_market, parse_market_id};
+use crate::bot::commands::market::{
+    autocomplete_market_option, autocomplete_open_market, parse_market_id,
+};
 use crate::bot::ui;
 use crate::bot::{Context, display_name};
 use crate::error::AppError;
@@ -295,9 +297,7 @@ pub async fn decline_loan(
         "🚫 Loan Declined",
         format!(
             "**Loan:** **#{}**\n**Counterparty:** **{}**\n**Status:** **{}**",
-            receipt.loan_id,
-            receipt.counterparty_display_name,
-            receipt.status
+            receipt.loan_id, receipt.counterparty_display_name, receipt.status
         ),
         poise::serenity_prelude::Colour::from_rgb(231, 76, 60),
     )
@@ -367,8 +367,7 @@ pub async fn loan_status(ctx: Context<'_>) -> Result<(), AppError> {
 #[poise::command(slash_command)]
 pub async fn repay_loan(
     ctx: Context<'_>,
-    #[description = "Active loan"]
-    loan: String,
+    #[description = "Active loan"] loan: String,
     #[description = "Money repayment amount"] amount_mana: Option<i64>,
     #[description = "Share repayment amount"] shares: Option<f64>,
 ) -> Result<(), AppError> {
@@ -392,7 +391,10 @@ pub async fn repay_loan(
         ui::shares(receipt.paid_shares.unwrap_or(0.0))
     };
     let remaining = if receipt.asset_type == "money" {
-        ui::money(ctx.data().config.as_ref(), receipt.remaining_mana.unwrap_or(0))
+        ui::money(
+            ctx.data().config.as_ref(),
+            receipt.remaining_mana.unwrap_or(0),
+        )
     } else {
         ui::shares(receipt.remaining_shares.unwrap_or(0.0))
     };

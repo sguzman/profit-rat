@@ -60,7 +60,8 @@ pub fn spawn_background_jobs(
         }
     });
 
-    let loan_every = Duration::from_secs(config.share_offer_cleanup_interval_seconds.max(10) as u64);
+    let loan_every =
+        Duration::from_secs(config.share_offer_cleanup_interval_seconds.max(10) as u64);
     let loan_services = services.clone();
     tokio::spawn(async move {
         info!(
@@ -79,7 +80,9 @@ pub fn spawn_background_jobs(
                 Err(error) => error!(%error, "loan expiry worker failed"),
             }
             match loan_services.social.mark_overdue_loans().await {
-                Ok(defaulted) if defaulted > 0 => info!(defaulted, "marked overdue loans as defaulted"),
+                Ok(defaulted) if defaulted > 0 => {
+                    info!(defaulted, "marked overdue loans as defaulted")
+                }
                 Ok(_) => {}
                 Err(error) => error!(%error, "loan default worker failed"),
             }

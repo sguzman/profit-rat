@@ -6,6 +6,7 @@ use tracing::{error, info, instrument};
 
 use crate::error::AppError;
 use crate::services::Services;
+use crate::startup;
 
 pub type Context<'a> = poise::Context<'a, Data, AppError>;
 
@@ -50,7 +51,14 @@ pub fn build_framework(
             let config = config.clone();
             Box::pin(async move {
                 info!(bot_user = %ready.user.name, "discord bot connected");
-                poise::builtins::register_globally(ctx, &framework.options().commands).await?;
+                startup::sync_commands_and_announce(
+                    ctx,
+                    ready,
+                    &framework.options().commands,
+                    config.as_ref(),
+                    &services,
+                )
+                .await?;
                 Ok(Data { services, config })
             })
         })

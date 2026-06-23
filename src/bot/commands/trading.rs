@@ -4,7 +4,7 @@ use crate::bot::commands::market::{
     parse_market_id,
 };
 use crate::bot::ui;
-use crate::bot::{display_name, Context};
+use crate::bot::{Context, display_name};
 use crate::config::AppConfig;
 use crate::error::AppError;
 use crate::services::market_service::PositionSummaryLine;
@@ -276,7 +276,10 @@ pub async fn market_book(
     ui::send_embed(
         ctx,
         format!("📚 Market Book #{}", book.market_id),
-        format!("**{}**\n\n**Buy side**\n{}\n\n**Sell side**\n{}", book.market_question, buys, sells),
+        format!(
+            "**{}**\n\n**Buy side**\n{}\n\n**Sell side**\n{}",
+            book.market_question, buys, sells
+        ),
         serenity::Colour::from_rgb(142, 68, 173),
     )
     .await?;
@@ -342,7 +345,11 @@ pub async fn cancel_order(
         .data()
         .services
         .trading
-        .cancel_order(&guild_id.to_string(), &ctx.author().id.to_string(), order_id)
+        .cancel_order(
+            &guild_id.to_string(),
+            &ctx.author().id.to_string(),
+            order_id,
+        )
         .await?;
     if !cancelled {
         return Err(AppError::NotFound(
@@ -526,7 +533,11 @@ pub async fn decline_share_offer(
         .data()
         .services
         .trading
-        .decline_share_offer(&guild_id.to_string(), offer_id, &ctx.author().id.to_string())
+        .decline_share_offer(
+            &guild_id.to_string(),
+            offer_id,
+            &ctx.author().id.to_string(),
+        )
         .await?;
     ui::send_embed(
         ctx,

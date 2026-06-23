@@ -1,5 +1,5 @@
-use crate::bot::ui;
 use crate::bot::Context;
+use crate::bot::ui;
 use crate::error::AppError;
 
 #[poise::command(slash_command)]

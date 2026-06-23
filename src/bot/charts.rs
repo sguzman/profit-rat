@@ -30,7 +30,11 @@ pub fn render_option_price_histogram(
             (
                 option.label.clone(),
                 probability,
-                format!("{:.2}% • {} shares", probability * 100.0, option.shares_outstanding.round()),
+                format!(
+                    "{:.2}% • {} shares",
+                    probability * 100.0,
+                    option.shares_outstanding.round()
+                ),
             )
         })
         .collect::<Vec<_>>();
@@ -101,12 +105,14 @@ pub fn render_time_series_chart(
     let path = next_chart_path(config, "time-histogram")?;
     {
         let root = BitMapBackend::new(&path, CHART_SIZE).into_drawing_area();
-        root.fill(&RGBColor(247, 243, 233))
-            .map_err(plotters_err)?;
+        root.fill(&RGBColor(247, 243, 233)).map_err(plotters_err)?;
         let plot = root.margin(24, 24, 24, 24);
         let card = plot
             .titled(
-                &format!("Price History · #{} · {}", history.market_id, history.question),
+                &format!(
+                    "Price History · #{} · {}",
+                    history.market_id, history.question
+                ),
                 ("sans-serif", 34).into_font().style(FontStyle::Bold),
             )
             .map_err(plotters_err)?;
@@ -155,7 +161,10 @@ pub fn render_time_series_chart(
             let color = palette(index);
             chart
                 .draw_series(LineSeries::new(
-                    series.points.iter().map(|point| (point.at, point.probability)),
+                    series
+                        .points
+                        .iter()
+                        .map(|point| (point.at, point.probability)),
                     color.stroke_width(4),
                 ))
                 .map_err(plotters_err)?
@@ -165,9 +174,12 @@ pub fn render_time_series_chart(
                 });
 
             chart
-                .draw_series(series.points.iter().map(|point| {
-                    Circle::new((point.at, point.probability), 4, color.filled())
-                }))
+                .draw_series(
+                    series
+                        .points
+                        .iter()
+                        .map(|point| Circle::new((point.at, point.probability), 4, color.filled())),
+                )
                 .map_err(plotters_err)?;
         }
 
@@ -202,21 +214,19 @@ fn render_bar_chart(
     let path = next_chart_path(config, prefix)?;
     {
         let root = BitMapBackend::new(&path, CHART_SIZE).into_drawing_area();
-        root.fill(&RGBColor(247, 243, 233))
-            .map_err(plotters_err)?;
+        root.fill(&RGBColor(247, 243, 233)).map_err(plotters_err)?;
         let plot = root.margin(24, 24, 24, 24);
 
         let title_area = plot
-            .titled(
-                title,
-                ("sans-serif", 34).into_font().style(FontStyle::Bold),
-            )
+            .titled(title, ("sans-serif", 34).into_font().style(FontStyle::Bold))
             .map_err(plotters_err)?;
         title_area
             .draw(&Text::new(
                 subtitle.to_string(),
                 (32, 56),
-                ("sans-serif", 22).into_font().color(&RGBColor(97, 107, 117)),
+                ("sans-serif", 22)
+                    .into_font()
+                    .color(&RGBColor(97, 107, 117)),
             ))
             .map_err(plotters_err)?;
 
@@ -270,7 +280,9 @@ fn render_bar_chart(
                 Text::new(
                     short_label(detail, 28),
                     (index as i32, label_y),
-                    ("sans-serif", 15).into_font().color(&RGBColor(97, 107, 117)),
+                    ("sans-serif", 15)
+                        .into_font()
+                        .color(&RGBColor(97, 107, 117)),
                 )
             }))
             .map_err(plotters_err)?;
@@ -308,7 +320,10 @@ fn short_label(value: &str, max_chars: usize) -> String {
     if trimmed.chars().count() <= max_chars {
         return trimmed.to_string();
     }
-    let head = trimmed.chars().take(max_chars.saturating_sub(1)).collect::<String>();
+    let head = trimmed
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
     format!("{head}…")
 }
 

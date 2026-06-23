@@ -248,7 +248,9 @@ On boot, the bot will:
 - apply migrations
 - migrate legacy single-guild global users where possible
 - connect to Discord
-- register slash commands globally
+- register slash commands in each current guild for immediate sync
+- refresh global slash commands for eventual consistency
+- announce command/version changes in a system channel or the latest known market channel when the command catalog changes
 
 ## Guild Admin CLI
 

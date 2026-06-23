@@ -8,6 +8,7 @@ mod integrations;
 mod jobs;
 mod logging;
 mod services;
+mod startup;
 
 use std::sync::Arc;
 

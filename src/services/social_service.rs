@@ -131,7 +131,10 @@ impl SocialService {
         Self { config, pool }
     }
 
-    #[instrument(skip(self), fields(guild_id, sender_user_id, recipient_user_id, amount_mana))]
+    #[instrument(
+        skip(self),
+        fields(guild_id, sender_user_id, recipient_user_id, amount_mana)
+    )]
     pub async fn donate_money(
         &self,
         guild_id: &str,
@@ -171,8 +174,10 @@ impl SocialService {
         }
 
         let mut tx = self.pool.begin().await?;
-        self.adjust_balance(&mut tx, guild_id, sender_user_id, -amount_mana).await?;
-        self.adjust_balance(&mut tx, guild_id, recipient_user_id, amount_mana).await?;
+        self.adjust_balance(&mut tx, guild_id, sender_user_id, -amount_mana)
+            .await?;
+        self.adjust_balance(&mut tx, guild_id, recipient_user_id, amount_mana)
+            .await?;
         self.insert_money_event(
             &mut tx,
             guild_id,
@@ -202,7 +207,10 @@ impl SocialService {
         })
     }
 
-    #[instrument(skip(self), fields(guild_id, sender_user_id, recipient_user_id, market_id, shares))]
+    #[instrument(
+        skip(self),
+        fields(guild_id, sender_user_id, recipient_user_id, market_id, shares)
+    )]
     pub async fn donate_shares(
         &self,
         guild_id: &str,
@@ -236,8 +244,12 @@ impl SocialService {
         self.ensure_account(guild_id, recipient_user_id, recipient_display_name)
             .await?;
 
-        let (market, option) = self.load_market_and_option(guild_id, market_id, option_label).await?;
-        let sender_shares = self.position_shares(market_id, option.id, sender_user_id).await?;
+        let (market, option) = self
+            .load_market_and_option(guild_id, market_id, option_label)
+            .await?;
+        let sender_shares = self
+            .position_shares(market_id, option.id, sender_user_id)
+            .await?;
         if sender_shares + 1e-9 < shares {
             return Err(AppError::Conflict(
                 "you do not have enough shares for that donation".to_string(),
@@ -245,16 +257,8 @@ impl SocialService {
         }
 
         let mut tx = self.pool.begin().await?;
-        self.upsert_position(
-            &mut tx,
-            market_id,
-            option.id,
-            sender_user_id,
-            -shares,
-            0,
-            0,
-        )
-        .await?;
+        self.upsert_position(&mut tx, market_id, option.id, sender_user_id, -shares, 0, 0)
+            .await?;
         self.upsert_position(
             &mut tx,
             market_id,
@@ -296,7 +300,10 @@ impl SocialService {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[instrument(skip(self), fields(guild_id, lender_user_id, borrower_user_id, principal_mana))]
+    #[instrument(
+        skip(self),
+        fields(guild_id, lender_user_id, borrower_user_id, principal_mana)
+    )]
     pub async fn offer_loan_money(
         &self,
         guild_id: &str,
@@ -322,7 +329,9 @@ impl SocialService {
         )
         .await?;
         if principal_mana < self.config.transfers.min_money_transfer {
-            return Err(AppError::Validation("loan principal is too small".to_string()));
+            return Err(AppError::Validation(
+                "loan principal is too small".to_string(),
+            ));
         }
 
         let interest_bps = self.normalize_interest_bps(interest_bps)?;
@@ -334,8 +343,7 @@ impl SocialService {
             ));
         }
 
-        let repayment_mana =
-            principal_mana + ((principal_mana * interest_bps + 9_999) / 10_000);
+        let repayment_mana = principal_mana + ((principal_mana * interest_bps + 9_999) / 10_000);
         let (expires_at, due_at) = self.loan_timestamps(duration_seconds);
 
         let result = sqlx::query(
@@ -372,7 +380,10 @@ impl SocialService {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[instrument(skip(self), fields(guild_id, lender_user_id, borrower_user_id, market_id, shares))]
+    #[instrument(
+        skip(self),
+        fields(guild_id, lender_user_id, borrower_user_id, market_id, shares)
+    )]
     pub async fn offer_loan_shares(
         &self,
         guild_id: &str,
@@ -400,13 +411,19 @@ impl SocialService {
         )
         .await?;
         if shares < self.config.transfers.min_share_transfer {
-            return Err(AppError::Validation("loan share principal is too small".to_string()));
+            return Err(AppError::Validation(
+                "loan share principal is too small".to_string(),
+            ));
         }
 
         let interest_bps = self.normalize_interest_bps(interest_bps)?;
         let duration_seconds = self.normalize_duration(duration_seconds)?;
-        let (_, option) = self.load_market_and_option(guild_id, market_id, option_label).await?;
-        let lender_shares = self.position_shares(market_id, option.id, lender_user_id).await?;
+        let (_, option) = self
+            .load_market_and_option(guild_id, market_id, option_label)
+            .await?;
+        let lender_shares = self
+            .position_shares(market_id, option.id, lender_user_id)
+            .await?;
         if lender_shares + 1e-9 < shares {
             return Err(AppError::Conflict(
                 "lender does not currently have enough shares".to_string(),
@@ -560,7 +577,12 @@ impl SocialService {
                         .unwrap_or_else(|| "?".to_string())
                 };
                 serenity::AutocompleteChoice::new(
-                    format!("#{} {} from {}", row.get::<i64, _>("id"), quantity, lender_name),
+                    format!(
+                        "#{} {} from {}",
+                        row.get::<i64, _>("id"),
+                        quantity,
+                        lender_name
+                    ),
                     row.get::<i64, _>("id").to_string(),
                 )
             })
@@ -683,7 +705,11 @@ impl SocialService {
                 )
                 .await?;
             }
-            _ => return Err(AppError::External("unsupported loan asset type".to_string())),
+            _ => {
+                return Err(AppError::External(
+                    "unsupported loan asset type".to_string(),
+                ));
+            }
         }
 
         sqlx::query(
@@ -859,14 +885,19 @@ impl SocialService {
         let mut tx = self.pool.begin().await?;
         let (repaid_mana, repaid_shares) = self.repaid_totals_tx(&mut tx, loan.id).await?;
 
-        let (paid_mana, paid_shares, remaining_mana, remaining_shares) = match loan.asset_type.as_str() {
+        let (paid_mana, paid_shares, remaining_mana, remaining_shares) = match loan
+            .asset_type
+            .as_str()
+        {
             "money" => {
                 let due = loan.repayment_mana.unwrap_or(0);
                 let payment = amount_mana.ok_or_else(|| {
                     AppError::Validation("money repayment requires `amount_mana`".to_string())
                 })?;
                 if payment <= 0 {
-                    return Err(AppError::Validation("repayment must be positive".to_string()));
+                    return Err(AppError::Validation(
+                        "repayment must be positive".to_string(),
+                    ));
                 }
                 let remaining = (due - repaid_mana).max(0);
                 if !self.config.loans.allow_partial_repayment && payment < remaining {
@@ -880,7 +911,8 @@ impl SocialService {
                         "borrower does not have enough balance".to_string(),
                     ));
                 }
-                self.adjust_balance(&mut tx, guild_id, borrower_user_id, -payment).await?;
+                self.adjust_balance(&mut tx, guild_id, borrower_user_id, -payment)
+                    .await?;
                 self.adjust_balance(&mut tx, guild_id, &loan.lender_discord_user_id, payment)
                     .await?;
                 self.insert_money_event(
@@ -915,7 +947,12 @@ impl SocialService {
                 .bind(now_rfc3339())
                 .execute(&mut *tx)
                 .await?;
-                (Some(payment), None, Some((remaining - payment).max(0)), None)
+                (
+                    Some(payment),
+                    None,
+                    Some((remaining - payment).max(0)),
+                    None,
+                )
             }
             "shares" => {
                 let market_id = loan.market_id.unwrap_or(0);
@@ -925,7 +962,9 @@ impl SocialService {
                     AppError::Validation("share repayment requires `shares`".to_string())
                 })?;
                 if payment <= 0.0 {
-                    return Err(AppError::Validation("repayment must be positive".to_string()));
+                    return Err(AppError::Validation(
+                        "repayment must be positive".to_string(),
+                    ));
                 }
                 let remaining = (due - repaid_shares).max(0.0);
                 if !self.config.loans.allow_partial_repayment && payment + 1e-9 < remaining {
@@ -933,7 +972,9 @@ impl SocialService {
                         "partial repayment is disabled by server policy".to_string(),
                     ));
                 }
-                let borrower_shares = self.position_shares(market_id, option_id, borrower_user_id).await?;
+                let borrower_shares = self
+                    .position_shares(market_id, option_id, borrower_user_id)
+                    .await?;
                 if borrower_shares + 1e-9 < payment {
                     return Err(AppError::Conflict(
                         "borrower does not have enough shares".to_string(),
@@ -991,9 +1032,18 @@ impl SocialService {
                 .bind(now_rfc3339())
                 .execute(&mut *tx)
                 .await?;
-                (None, Some(payment), None, Some((remaining - payment).max(0.0)))
+                (
+                    None,
+                    Some(payment),
+                    None,
+                    Some((remaining - payment).max(0.0)),
+                )
             }
-            _ => return Err(AppError::External("unsupported loan asset type".to_string())),
+            _ => {
+                return Err(AppError::External(
+                    "unsupported loan asset type".to_string(),
+                ));
+            }
         };
 
         let (new_repaid_mana, new_repaid_shares) = self.repaid_totals_tx(&mut tx, loan.id).await?;
@@ -1164,7 +1214,12 @@ impl SocialService {
         Ok((market, option))
     }
 
-    async fn position_shares(&self, market_id: i64, option_id: i64, user_id: &str) -> AppResult<f64> {
+    async fn position_shares(
+        &self,
+        market_id: i64,
+        option_id: i64,
+        user_id: &str,
+    ) -> AppResult<f64> {
         let row = sqlx::query(
             "SELECT shares
              FROM positions
@@ -1372,9 +1427,13 @@ impl SocialService {
         Ok(value)
     }
 
-    fn loan_timestamps(&self, duration_seconds: i64) -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
+    fn loan_timestamps(
+        &self,
+        duration_seconds: i64,
+    ) -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
         let now = Utc::now();
-        let expires_at = now + Duration::seconds(self.config.share_offer_expiration_seconds.max(30));
+        let expires_at =
+            now + Duration::seconds(self.config.share_offer_expiration_seconds.max(30));
         let due_at = now + Duration::seconds(duration_seconds);
         (expires_at, due_at)
     }

@@ -186,14 +186,8 @@ impl AppConfig {
         };
 
         let transfers = TransferPolicyConfig {
-            allow_money_donations: merged
-                .transfers
-                .allow_money_donations
-                .unwrap_or(true),
-            allow_share_donations: merged
-                .transfers
-                .allow_share_donations
-                .unwrap_or(true),
+            allow_money_donations: merged.transfers.allow_money_donations.unwrap_or(true),
+            allow_share_donations: merged.transfers.allow_share_donations.unwrap_or(true),
             allow_money_offers: merged.transfers.allow_money_offers.unwrap_or(true),
             allow_share_offers: merged.transfers.allow_share_offers.unwrap_or(true),
             min_money_transfer: merged.transfers.min_money_transfer.unwrap_or(1),
@@ -230,7 +224,10 @@ impl AppConfig {
                 .currency
                 .display_name
                 .unwrap_or_else(|| "Fake Mana".to_string()),
-            singular: merged.currency.singular.unwrap_or_else(|| "mana".to_string()),
+            singular: merged
+                .currency
+                .singular
+                .unwrap_or_else(|| "mana".to_string()),
             plural: merged.currency.plural.unwrap_or_else(|| "mana".to_string()),
             symbol: merged.currency.symbol.unwrap_or_else(|| "".to_string()),
             textual_symbol: merged
@@ -412,9 +409,7 @@ impl PartialPolicyConfig {
             starting_balance: overlay.starting_balance.or(self.starting_balance),
             claim_amount: overlay.claim_amount.or(self.claim_amount),
             hourly_claim: overlay.hourly_claim.or(self.hourly_claim),
-            claim_period_seconds: overlay
-                .claim_period_seconds
-                .or(self.claim_period_seconds),
+            claim_period_seconds: overlay.claim_period_seconds.or(self.claim_period_seconds),
             claim_cooldown_seconds: overlay
                 .claim_cooldown_seconds
                 .or(self.claim_cooldown_seconds),
@@ -451,12 +446,8 @@ struct PartialTransferPolicyConfig {
 impl PartialTransferPolicyConfig {
     fn merge(self, overlay: Self) -> Self {
         Self {
-            allow_money_donations: overlay
-                .allow_money_donations
-                .or(self.allow_money_donations),
-            allow_share_donations: overlay
-                .allow_share_donations
-                .or(self.allow_share_donations),
+            allow_money_donations: overlay.allow_money_donations.or(self.allow_money_donations),
+            allow_share_donations: overlay.allow_share_donations.or(self.allow_share_donations),
             allow_money_offers: overlay.allow_money_offers.or(self.allow_money_offers),
             allow_share_offers: overlay.allow_share_offers.or(self.allow_share_offers),
             min_money_transfer: overlay.min_money_transfer.or(self.min_money_transfer),
@@ -500,18 +491,14 @@ impl PartialLoanPolicyConfig {
             allow_partial_repayment: overlay
                 .allow_partial_repayment
                 .or(self.allow_partial_repayment),
-            allow_early_repayment: overlay
-                .allow_early_repayment
-                .or(self.allow_early_repayment),
+            allow_early_repayment: overlay.allow_early_repayment.or(self.allow_early_repayment),
             allow_interest: overlay.allow_interest.or(self.allow_interest),
             default_interest_bps: overlay.default_interest_bps.or(self.default_interest_bps),
             max_interest_bps: overlay.max_interest_bps.or(self.max_interest_bps),
             default_duration_seconds: overlay
                 .default_duration_seconds
                 .or(self.default_duration_seconds),
-            max_duration_seconds: overlay
-                .max_duration_seconds
-                .or(self.max_duration_seconds),
+            max_duration_seconds: overlay.max_duration_seconds.or(self.max_duration_seconds),
             max_open_loans_per_user: overlay
                 .max_open_loans_per_user
                 .or(self.max_open_loans_per_user),

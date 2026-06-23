@@ -294,6 +294,36 @@ impl MarketService {
             .collect())
     }
 
+    #[instrument(skip(self), fields(guild_id))]
+    pub async fn latest_channel_for_guild(&self, guild_id: &str) -> AppResult<Option<u64>> {
+        let row = sqlx::query(
+            "SELECT channel_id
+             FROM markets
+             WHERE guild_id = ?1
+             ORDER BY id DESC
+             LIMIT 1",
+        )
+        .bind(guild_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        let channel_id: String = row.get("channel_id");
+        match channel_id.parse::<u64>() {
+            Ok(parsed) => Ok(Some(parsed)),
+            Err(_) => {
+                warn!(
+                    guild_id,
+                    channel_id, "failed to parse stored market channel id"
+                );
+                Ok(None)
+            }
+        }
+    }
+
     #[instrument(skip(self))]
     pub async fn market_view(&self, market_id: i64) -> AppResult<MarketView> {
         let detail = self.market_detail(market_id).await?;
@@ -320,7 +350,11 @@ impl MarketService {
     }
 
     #[instrument(skip(self))]
-    pub async fn market_view_for_guild(&self, guild_id: &str, market_id: i64) -> AppResult<MarketView> {
+    pub async fn market_view_for_guild(
+        &self,
+        guild_id: &str,
+        market_id: i64,
+    ) -> AppResult<MarketView> {
         let view = self.market_view(market_id).await?;
         self.ensure_market_belongs_to_guild(guild_id, &view.detail.market)?;
         Ok(view)
@@ -777,10 +811,22 @@ impl MarketService {
             let hour_cutoff = Utc::now() - chrono::Duration::hours(1);
             let day_cutoff = Utc::now() - chrono::Duration::hours(24);
             let price_1h = self
-                .historical_option_price(market.id, option.id, market.market_type(), current_price, hour_cutoff)
+                .historical_option_price(
+                    market.id,
+                    option.id,
+                    market.market_type(),
+                    current_price,
+                    hour_cutoff,
+                )
                 .await?;
             let price_24h = self
-                .historical_option_price(market.id, option.id, market.market_type(), current_price, day_cutoff)
+                .historical_option_price(
+                    market.id,
+                    option.id,
+                    market.market_type(),
+                    current_price,
+                    day_cutoff,
+                )
                 .await?;
 
             summaries.push(PositionSummaryLine {
@@ -829,7 +875,8 @@ impl MarketService {
         match market.market_type() {
             MarketType::Native => {
                 let created_at = parse_rfc3339_utc(&market.created_at)?;
-                let baseline = vec![1.0 / view.detail.options.len() as f64; view.detail.options.len()];
+                let baseline =
+                    vec![1.0 / view.detail.options.len() as f64; view.detail.options.len()];
                 push_series_snapshot(&mut series, created_at, &baseline);
 
                 let trades = sqlx::query(
@@ -916,7 +963,8 @@ impl MarketService {
     ) -> AppResult<i64> {
         let detail = self.market_detail(market_id).await?;
         self.ensure_market_belongs_to_guild(guild_id, &detail.market)?;
-        self.ensure_can_resolve_market(actor_user_id, &detail.market).await?;
+        self.ensure_can_resolve_market(actor_user_id, &detail.market)
+            .await?;
         if detail.market.market_type() != MarketType::Native {
             return Err(AppError::Validation(
                 "use `/msync` for manifold-tracked markets".to_string(),
@@ -1018,7 +1066,11 @@ impl MarketService {
                     MarketStatus::Cancelled,
                     None,
                     total_refund,
-                    if allow_edit { "edit_refund_na" } else { "resolve_refund_na" },
+                    if allow_edit {
+                        "edit_refund_na"
+                    } else {
+                        "resolve_refund_na"
+                    },
                     "resolved as N/A with refunds".to_string(),
                 )
             }
@@ -1559,11 +1611,7 @@ impl MarketService {
     }
 }
 
-fn push_series_snapshot(
-    series: &mut [OptionTimeSeries],
-    at: DateTime<Utc>,
-    probabilities: &[f64],
-) {
+fn push_series_snapshot(series: &mut [OptionTimeSeries], at: DateTime<Utc>, probabilities: &[f64]) {
     for (entry, probability) in series.iter_mut().zip(probabilities.iter().copied()) {
         entry.points.push(TimeSeriesPoint { at, probability });
     }
@@ -1572,7 +1620,11 @@ fn push_series_snapshot(
 fn parse_rfc3339_utc(value: &str) -> AppResult<DateTime<Utc>> {
     chrono::DateTime::parse_from_rfc3339(value)
         .map(|parsed| parsed.with_timezone(&Utc))
-        .map_err(|error| AppError::Other(anyhow::anyhow!("failed to parse timestamp `{value}`: {error}")))
+        .map_err(|error| {
+            AppError::Other(anyhow::anyhow!(
+                "failed to parse timestamp `{value}`: {error}"
+            ))
+        })
 }
 
 fn probabilities_from_snapshot_json(
@@ -1580,7 +1632,10 @@ fn probabilities_from_snapshot_json(
     fallback: &[f64],
     raw_json: &serde_json::Value,
 ) -> Vec<f64> {
-    if let Some(probability) = raw_json.get("probability").and_then(serde_json::Value::as_f64) {
+    if let Some(probability) = raw_json
+        .get("probability")
+        .and_then(serde_json::Value::as_f64)
+    {
         return options
             .iter()
             .enumerate()
@@ -1597,7 +1652,10 @@ fn probabilities_from_snapshot_json(
             .collect();
     }
 
-    let Some(answers) = raw_json.get("answers").and_then(serde_json::Value::as_array) else {
+    let Some(answers) = raw_json
+        .get("answers")
+        .and_then(serde_json::Value::as_array)
+    else {
         return fallback.to_vec();
     };
 

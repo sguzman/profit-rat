@@ -234,7 +234,9 @@ impl TradingService {
 
         let option_index = find_option_index(&detail.options, &request.option_label)?;
         let option = detail.options[option_index].clone();
-        let balance = self.user_balance(&request.guild_id, &request.user_id).await?;
+        let balance = self
+            .user_balance(&request.guild_id, &request.user_id)
+            .await?;
         if balance < request.amount_mana {
             return Err(AppError::Conflict(
                 "insufficient fake mana balance".to_string(),
@@ -369,7 +371,8 @@ impl TradingService {
             quantity_shares = request.quantity_shares,
             "created limit order"
         );
-        self.process_limit_orders_for_market(request.market_id).await?;
+        self.process_limit_orders_for_market(request.market_id)
+            .await?;
 
         let row = sqlx::query_as::<_, MarketOrderRecord>(
             "SELECT id, guild_id, market_id, option_id, discord_user_id, side, quantity_shares, trigger_price, status, created_at, executed_at, cancelled_at, failure_note
@@ -391,11 +394,7 @@ impl TradingService {
     }
 
     #[instrument(skip(self))]
-    pub async fn market_book(
-        &self,
-        guild_id: &str,
-        market_id: i64,
-    ) -> AppResult<MarketBookView> {
+    pub async fn market_book(&self, guild_id: &str, market_id: i64) -> AppResult<MarketBookView> {
         let detail = self.load_market_in_guild(guild_id, market_id).await?;
         let rows = sqlx::query(
             "SELECT
@@ -523,13 +522,13 @@ impl TradingService {
             &request.seller_user_id,
             &request.seller_display_name,
         )
-            .await?;
+        .await?;
         self.ensure_account(
             &request.guild_id,
             &request.buyer_user_id,
             &request.buyer_display_name,
         )
-            .await?;
+        .await?;
 
         if request.seller_user_id == request.buyer_user_id {
             return Err(AppError::Validation(
@@ -990,12 +989,12 @@ impl TradingService {
              SET balance_mana = balance_mana - ?2, updated_at = ?3
              WHERE guild_id = ?1 AND discord_user_id = ?4",
         )
-            .bind(&request.guild_id)
-            .bind(request.amount_mana)
-            .bind(now_rfc3339())
-            .bind(&request.user_id)
-            .execute(&mut *tx)
-            .await?;
+        .bind(&request.guild_id)
+        .bind(request.amount_mana)
+        .bind(now_rfc3339())
+        .bind(&request.user_id)
+        .execute(&mut *tx)
+        .await?;
         sqlx::query(
             "UPDATE market_options SET shares_outstanding = shares_outstanding + ?2 WHERE id = ?1",
         )
@@ -1038,9 +1037,12 @@ impl TradingService {
         )
         .await?;
         tx.commit().await?;
-        self.process_limit_orders_for_market(request.market_id).await?;
+        self.process_limit_orders_for_market(request.market_id)
+            .await?;
 
-        let balance_mana = self.user_balance(&request.guild_id, &request.user_id).await?;
+        let balance_mana = self
+            .user_balance(&request.guild_id, &request.user_id)
+            .await?;
         Ok(TradeReceipt {
             market_id: request.market_id,
             market_type: "native".to_string(),
@@ -1135,7 +1137,9 @@ impl TradingService {
             market_id: request.market_id,
             market_type: "native".to_string(),
             option_label: option.label,
-            balance_mana: self.user_balance(&request.guild_id, &request.user_id).await?,
+            balance_mana: self
+                .user_balance(&request.guild_id, &request.user_id)
+                .await?,
             mana_amount: amount_mana,
             shares_delta,
             price_before,
@@ -1169,12 +1173,12 @@ impl TradingService {
              SET balance_mana = balance_mana - ?2, updated_at = ?3
              WHERE guild_id = ?1 AND discord_user_id = ?4",
         )
-            .bind(&request.guild_id)
-            .bind(request.amount_mana)
-            .bind(now_rfc3339())
-            .bind(&request.user_id)
-            .execute(&mut *tx)
-            .await?;
+        .bind(&request.guild_id)
+        .bind(request.amount_mana)
+        .bind(now_rfc3339())
+        .bind(&request.user_id)
+        .execute(&mut *tx)
+        .await?;
         self.upsert_position(
             &mut tx,
             request.market_id,
@@ -1210,13 +1214,16 @@ impl TradingService {
         )
         .await?;
         tx.commit().await?;
-        self.process_limit_orders_for_market(request.market_id).await?;
+        self.process_limit_orders_for_market(request.market_id)
+            .await?;
 
         Ok(TradeReceipt {
             market_id: request.market_id,
             market_type: "manifold".to_string(),
             option_label: option.label,
-            balance_mana: self.user_balance(&request.guild_id, &request.user_id).await?,
+            balance_mana: self
+                .user_balance(&request.guild_id, &request.user_id)
+                .await?,
             mana_amount: request.amount_mana,
             shares_delta,
             price_before,
@@ -1235,7 +1242,8 @@ impl TradingService {
         let receipt = self
             .sell_native_internal(request, liquidity_b, options, option_index, option, "sell")
             .await?;
-        self.process_limit_orders_for_market(receipt.market_id).await?;
+        self.process_limit_orders_for_market(receipt.market_id)
+            .await?;
         Ok(receipt)
     }
 
@@ -1272,12 +1280,12 @@ impl TradingService {
              SET balance_mana = balance_mana + ?2, updated_at = ?3
              WHERE guild_id = ?1 AND discord_user_id = ?4",
         )
-            .bind(&request.guild_id)
-            .bind(revenue)
-            .bind(now_rfc3339())
-            .bind(&request.user_id)
-            .execute(&mut *tx)
-            .await?;
+        .bind(&request.guild_id)
+        .bind(revenue)
+        .bind(now_rfc3339())
+        .bind(&request.user_id)
+        .execute(&mut *tx)
+        .await?;
         sqlx::query(
             "UPDATE market_options SET shares_outstanding = shares_outstanding - ?2 WHERE id = ?1",
         )
@@ -1325,7 +1333,9 @@ impl TradingService {
             market_id: request.market_id,
             market_type: "native".to_string(),
             option_label: option.label,
-            balance_mana: self.user_balance(&request.guild_id, &request.user_id).await?,
+            balance_mana: self
+                .user_balance(&request.guild_id, &request.user_id)
+                .await?,
             mana_amount: revenue,
             shares_delta: request.shares,
             price_before,
@@ -1355,12 +1365,12 @@ impl TradingService {
              SET balance_mana = balance_mana + ?2, updated_at = ?3
              WHERE guild_id = ?1 AND discord_user_id = ?4",
         )
-            .bind(&request.guild_id)
-            .bind(revenue)
-            .bind(now_rfc3339())
-            .bind(&request.user_id)
-            .execute(&mut *tx)
-            .await?;
+        .bind(&request.guild_id)
+        .bind(revenue)
+        .bind(now_rfc3339())
+        .bind(&request.user_id)
+        .execute(&mut *tx)
+        .await?;
         self.upsert_position(
             &mut tx,
             request.market_id,
@@ -1401,7 +1411,9 @@ impl TradingService {
             market_id: request.market_id,
             market_type: "manifold".to_string(),
             option_label: option.label,
-            balance_mana: self.user_balance(&request.guild_id, &request.user_id).await?,
+            balance_mana: self
+                .user_balance(&request.guild_id, &request.user_id)
+                .await?,
             mana_amount: revenue,
             shares_delta: request.shares,
             price_before: price,
@@ -1421,7 +1433,9 @@ impl TradingService {
 
     async fn try_execute_next_limit_order(&self, market_id: i64) -> AppResult<bool> {
         let detail = self.load_market(market_id).await?;
-        if detail.market.market_type() != MarketType::Native || detail.market.status() != MarketStatus::Open {
+        if detail.market.market_type() != MarketType::Native
+            || detail.market.status() != MarketStatus::Open
+        {
             return Ok(false);
         }
         let shares_state = detail
@@ -1442,8 +1456,13 @@ impl TradingService {
         .await?;
 
         for order in orders {
-            let Some(option_index) = detail.options.iter().position(|option| option.id == order.option_id) else {
-                self.fail_market_order(order.id, "option no longer exists").await?;
+            let Some(option_index) = detail
+                .options
+                .iter()
+                .position(|option| option.id == order.option_id)
+            else {
+                self.fail_market_order(order.id, "option no longer exists")
+                    .await?;
                 return Ok(true);
             };
             let current_price = probabilities[option_index];
@@ -1451,7 +1470,8 @@ impl TradingService {
                 "buy" => current_price <= order.trigger_price + 1e-9,
                 "sell" => current_price >= order.trigger_price - 1e-9,
                 _ => {
-                    self.fail_market_order(order.id, "unknown order side").await?;
+                    self.fail_market_order(order.id, "unknown order side")
+                        .await?;
                     return Ok(true);
                 }
             };
@@ -1469,7 +1489,9 @@ impl TradingService {
                         detail.market.liquidity_b,
                     )?
                     .round() as i64;
-                    let balance = self.user_balance(&order.guild_id, &order.discord_user_id).await?;
+                    let balance = self
+                        .user_balance(&order.guild_id, &order.discord_user_id)
+                        .await?;
                     if balance < estimated_cost {
                         self.fail_market_order(order.id, "insufficient balance at trigger time")
                             .await?;
@@ -1478,19 +1500,22 @@ impl TradingService {
                     let request = BuyRequest {
                         guild_id: order.guild_id.clone(),
                         user_id: order.discord_user_id.clone(),
-                        display_name: self.user_display_name(&order.guild_id, &order.discord_user_id).await?,
+                        display_name: self
+                            .user_display_name(&order.guild_id, &order.discord_user_id)
+                            .await?,
                         market_id,
                         option_label: option.label.clone(),
                         amount_mana: estimated_cost,
                     };
-                    let _ = self.buy_native_exact_shares(
-                        request,
-                        &detail.options,
-                        option_index,
-                        option,
-                        order.quantity_shares,
-                    )
-                    .await?;
+                    let _ = self
+                        .buy_native_exact_shares(
+                            request,
+                            &detail.options,
+                            option_index,
+                            option,
+                            order.quantity_shares,
+                        )
+                        .await?;
                     self.mark_market_order_executed(order.id).await?;
                     return Ok(true);
                 }
@@ -1506,7 +1531,9 @@ impl TradingService {
                     let request = SellRequest {
                         guild_id: order.guild_id.clone(),
                         user_id: order.discord_user_id.clone(),
-                        display_name: self.user_display_name(&order.guild_id, &order.discord_user_id).await?,
+                        display_name: self
+                            .user_display_name(&order.guild_id, &order.discord_user_id)
+                            .await?,
                         market_id,
                         option_label: option.label.clone(),
                         shares: order.quantity_shares,
@@ -1640,10 +1667,10 @@ impl TradingService {
              FROM guild_accounts
              WHERE guild_id = ?1 AND discord_user_id = ?2",
         )
-            .bind(guild_id)
-            .bind(user_id)
-            .fetch_optional(&self.pool)
-            .await?;
+        .bind(guild_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
         if existing.is_none() {
             let now = now_rfc3339();
             let mut tx = self.pool.begin().await?;
@@ -1680,10 +1707,10 @@ impl TradingService {
              FROM guild_accounts
              WHERE guild_id = ?1 AND discord_user_id = ?2",
         )
-            .bind(guild_id)
-            .bind(user_id)
-            .fetch_one(&self.pool)
-            .await?;
+        .bind(guild_id)
+        .bind(user_id)
+        .fetch_one(&self.pool)
+        .await?;
         Ok(row.get("balance_mana"))
     }
 
@@ -1815,10 +1842,10 @@ impl TradingService {
              FROM guild_accounts
              WHERE guild_id = ?1 AND discord_user_id = ?2",
         )
-            .bind(guild_id)
-            .bind(user_id)
-            .fetch_optional(&self.pool)
-            .await?;
+        .bind(guild_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
         Ok(row
             .and_then(|row| row.get::<Option<String>, _>("display_name"))
             .unwrap_or_else(|| user_id.to_string()))

@@ -116,7 +116,11 @@ pub fn money_plain(config: &AppConfig, amount: i64, embed_context: bool) -> Stri
         textual
     };
 
-    let space = if config.currency.space_between { " " } else { "" };
+    let space = if config.currency.space_between {
+        " "
+    } else {
+        ""
+    };
     let body = match config.currency.position {
         CurrencyPosition::Prefix
             if config.currency.show_symbol && !config.currency.symbol.is_empty() =>
@@ -141,7 +145,11 @@ pub fn money_plain(config: &AppConfig, amount: i64, embed_context: bool) -> Stri
 pub fn money_decimal(config: &AppConfig, amount: f64, precision: usize) -> String {
     let absolute = amount.abs();
     let formatted = format!("{absolute:.precision$}");
-    let space = if config.currency.space_between { " " } else { "" };
+    let space = if config.currency.space_between {
+        " "
+    } else {
+        ""
+    };
 
     let unit = if config.currency.show_code {
         config.currency.code.as_str()

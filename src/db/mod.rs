@@ -90,9 +90,10 @@ async fn migrate_legacy_global_users(pool: &DbPool, config: &AppConfig) -> AppRe
     }
 
     if !ambiguous_users.is_empty() {
-        let backup_path = config
-            .cache_dir
-            .join(format!("discord-bot.legacy-backup.{}.sqlite", Utc::now().timestamp()));
+        let backup_path = config.cache_dir.join(format!(
+            "discord-bot.legacy-backup.{}.sqlite",
+            Utc::now().timestamp()
+        ));
         if !backup_path.exists() {
             if let Err(error) = fs::copy(&config.database_path, &backup_path) {
                 warn!(%error, backup = %backup_path.display(), "failed to back up legacy database before ambiguous guild migration");

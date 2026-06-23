@@ -30,5 +30,6 @@
 - [x] Add direct `/donate_money` and `/donate_shares` flows with atomic writes and guild-only boundaries.
 - [x] Add guild-scoped `/offer_loan_money`, `/offer_loan_shares`, `/incoming_loans`, `/accept_loan`, `/decline_loan`, `/loan_status`, and `/repay_loan`.
 - [x] Add background maintenance for share-offer expiry, pending-loan expiry, and overdue-loan defaulting.
+- [x] Sync slash commands immediately per guild on restart and announce command catalog/version changes from a `.cache` startup manifest.
 - [ ] Generalize existing peer offers onto `asset_offers` and expose `/offer_money`, `/incoming_offers`, `/accept_offer`, and `/decline_offer`.
 - [ ] Add end-to-end tests for donations, loans, and guild-isolation behavior across multiple guilds.

@@ -2,7 +2,7 @@ use chrono::{DateTime, Local, LocalResult, NaiveDate, NaiveDateTime, TimeZone, U
 use poise::serenity_prelude as serenity;
 
 use crate::bot::ui;
-use crate::bot::{display_name, Context};
+use crate::bot::{Context, display_name};
 use crate::error::{AppError, AppResult};
 use crate::services::market_service::CreateMarketRequest;
 
@@ -294,7 +294,11 @@ pub async fn resolve_market_na(
         .data()
         .services
         .markets
-        .resolve_native_market_na(&guild_id.to_string(), market_id, &ctx.author().id.to_string())
+        .resolve_native_market_na(
+            &guild_id.to_string(),
+            market_id,
+            &ctx.author().id.to_string(),
+        )
         .await?;
     ui::send_embed(
         ctx,
@@ -366,7 +370,11 @@ pub async fn edit_resolution_na(
         .data()
         .services
         .markets
-        .edit_native_resolution_na(&guild_id.to_string(), market_id, &ctx.author().id.to_string())
+        .edit_native_resolution_na(
+            &guild_id.to_string(),
+            market_id,
+            &ctx.author().id.to_string(),
+        )
         .await?;
     ui::send_embed(
         ctx,
@@ -558,7 +566,12 @@ pub async fn msync(
             "that market is not a Manifold-tracked market".to_string(),
         ));
     }
-    let synced = ctx.data().services.markets.sync_manifold_market(market_id).await?;
+    let synced = ctx
+        .data()
+        .services
+        .markets
+        .sync_manifold_market(market_id)
+        .await?;
     ui::send_market_embed(
         ctx,
         "🔄 Manifold Synced",

@@ -5,7 +5,7 @@ use tracing::info;
 
 use crate::bot::charts;
 use crate::bot::commands::market::{autocomplete_any_market, parse_market_id};
-use crate::bot::{display_name, Context};
+use crate::bot::{Context, display_name};
 use crate::error::{AppError, AppResult};
 
 #[poise::command(slash_command)]
@@ -152,7 +152,9 @@ pub async fn histogram_position(
     let question = positions[0].market_question.clone();
     let mut by_option = HashMap::<String, (f64, i64, i64)>::new();
     for position in positions {
-        let entry = by_option.entry(position.option_label).or_insert((0.0, 0, 0));
+        let entry = by_option
+            .entry(position.option_label)
+            .or_insert((0.0, 0, 0));
         entry.0 += position.shares;
         entry.1 += position.current_value_mana;
         entry.2 += position.payout_if_correct_mana;
@@ -248,7 +250,12 @@ fn require_guild(ctx: Context<'_>) -> AppResult<serenity::GuildId> {
 }
 
 fn parse_holder_metric(value: Option<&str>) -> AppResult<HolderMetric> {
-    match value.unwrap_or("shares").trim().to_ascii_lowercase().as_str() {
+    match value
+        .unwrap_or("shares")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "shares" => Ok(HolderMetric::Shares),
         "value" => Ok(HolderMetric::Value),
         _ => Err(AppError::Validation(
