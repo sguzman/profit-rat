@@ -2,7 +2,7 @@ use chrono::{DateTime, Local, LocalResult, NaiveDate, NaiveDateTime, TimeZone, U
 use poise::serenity_prelude as serenity;
 
 use crate::bot::ui;
-use crate::bot::{Context, display_name};
+use crate::bot::{display_name, Context};
 use crate::error::{AppError, AppResult};
 use crate::services::market_service::CreateMarketRequest;
 
@@ -86,7 +86,7 @@ async fn send_markets_list(ctx: Context<'_>, status: Option<String>) -> Result<(
             ctx,
             "🗂️ Market List",
             "No markets matched that filter. The rat found nothing worth fake-betting on.",
-            poise::serenity_prelude::Colour::from_rgb(127, 140, 141),
+            serenity::Colour::from_rgb(127, 140, 141),
         )
         .await?;
         return Ok(());
@@ -107,7 +107,7 @@ async fn send_markets_list(ctx: Context<'_>, status: Option<String>) -> Result<(
                     "open" => "🟢 **Open**",
                     "settled" => "💸 **Settled**",
                     "resolved" => "🔨 **Resolved**",
-                    "cancelled" => "⚫ **Cancelled**",
+                    "cancelled" => "⚫ **Cancelled / N/A**",
                     _ => "🟡 **Other**",
                 },
                 market.question
@@ -119,7 +119,7 @@ async fn send_markets_list(ctx: Context<'_>, status: Option<String>) -> Result<(
         ctx,
         "🗂️ Market List",
         body,
-        poise::serenity_prelude::Colour::from_rgb(52, 152, 219),
+        serenity::Colour::from_rgb(52, 152, 219),
     )
     .await?;
     Ok(())
@@ -241,7 +241,7 @@ pub async fn market_holders(
 #[poise::command(slash_command)]
 pub async fn resolve_market(
     ctx: Context<'_>,
-    #[description = "Pick a native market to resolve"]
+    #[description = "Pick an open native market to resolve"]
     #[autocomplete = "autocomplete_open_native_market"]
     market: String,
     #[description = "Winning option label"]
@@ -256,7 +256,12 @@ pub async fn resolve_market(
         .data()
         .services
         .markets
-        .resolve_native_market(&guild_id.to_string(), market_id, &winning_option)
+        .resolve_native_market(
+            &guild_id.to_string(),
+            market_id,
+            &ctx.author().id.to_string(),
+            &winning_option,
+        )
         .await?;
     ui::send_embed(
         ctx,
@@ -268,7 +273,189 @@ pub async fn resolve_market(
             winning_option,
             ui::money(ctx.data().config.as_ref(), payout)
         ),
-        poise::serenity_prelude::Colour::from_rgb(52, 152, 219),
+        serenity::Colour::from_rgb(52, 152, 219),
+    )
+    .await?;
+    Ok(())
+}
+
+#[poise::command(slash_command)]
+pub async fn resolve_market_na(
+    ctx: Context<'_>,
+    #[description = "Pick an open native market to resolve as N/A"]
+    #[autocomplete = "autocomplete_open_native_market"]
+    market: String,
+) -> Result<(), AppError> {
+    let guild_id = ctx.guild_id().ok_or_else(|| {
+        AppError::Validation("markets can only be resolved inside a server".to_string())
+    })?;
+    let market_id = parse_market_id(&market)?;
+    let total_refund = ctx
+        .data()
+        .services
+        .markets
+        .resolve_native_market_na(&guild_id.to_string(), market_id, &ctx.author().id.to_string())
+        .await?;
+    ui::send_embed(
+        ctx,
+        "🧾 Market Resolved N/A",
+        format!(
+            "Market **#{}** has been resolved as **N/A**.\nEveryone with refundable exposure was paid back.\n**Total refund:** {}",
+            market_id,
+            ui::money(ctx.data().config.as_ref(), total_refund)
+        ),
+        serenity::Colour::from_rgb(241, 196, 15),
+    )
+    .await?;
+    Ok(())
+}
+
+#[poise::command(slash_command)]
+pub async fn edit_resolution(
+    ctx: Context<'_>,
+    #[description = "Pick a native market to edit"]
+    #[autocomplete = "autocomplete_native_market"]
+    market: String,
+    #[description = "New winning option label"]
+    #[autocomplete = "autocomplete_market_option"]
+    winning_option: String,
+) -> Result<(), AppError> {
+    let guild_id = ctx.guild_id().ok_or_else(|| {
+        AppError::Validation("markets can only be edited inside a server".to_string())
+    })?;
+    let market_id = parse_market_id(&market)?;
+    let payout = ctx
+        .data()
+        .services
+        .markets
+        .edit_native_resolution(
+            &guild_id.to_string(),
+            market_id,
+            &ctx.author().id.to_string(),
+            &winning_option,
+        )
+        .await?;
+    ui::send_embed(
+        ctx,
+        "🛠️ Resolution Edited",
+        format!(
+            "Market **#{}** was edited.\n**New winner:** {} **{}**\n**Total payout now:** {}",
+            market_id,
+            ui::option_emoji(&winning_option),
+            winning_option,
+            ui::money(ctx.data().config.as_ref(), payout)
+        ),
+        serenity::Colour::from_rgb(230, 126, 34),
+    )
+    .await?;
+    Ok(())
+}
+
+#[poise::command(slash_command)]
+pub async fn edit_resolution_na(
+    ctx: Context<'_>,
+    #[description = "Pick a native market to edit into N/A"]
+    #[autocomplete = "autocomplete_native_market"]
+    market: String,
+) -> Result<(), AppError> {
+    let guild_id = ctx.guild_id().ok_or_else(|| {
+        AppError::Validation("markets can only be edited inside a server".to_string())
+    })?;
+    let market_id = parse_market_id(&market)?;
+    let total_refund = ctx
+        .data()
+        .services
+        .markets
+        .edit_native_resolution_na(&guild_id.to_string(), market_id, &ctx.author().id.to_string())
+        .await?;
+    ui::send_embed(
+        ctx,
+        "🛠️ Resolution Edited To N/A",
+        format!(
+            "Market **#{}** was changed to **N/A**.\nRefunds were recalculated.\n**Total refund now:** {}",
+            market_id,
+            ui::money(ctx.data().config.as_ref(), total_refund)
+        ),
+        serenity::Colour::from_rgb(243, 156, 18),
+    )
+    .await?;
+    Ok(())
+}
+
+#[poise::command(slash_command)]
+pub async fn add_mod(
+    ctx: Context<'_>,
+    #[description = "Pick a native market"]
+    #[autocomplete = "autocomplete_native_market"]
+    market: String,
+    #[description = "User to grant resolve power"] user: serenity::User,
+) -> Result<(), AppError> {
+    let guild_id = ctx.guild_id().ok_or_else(|| {
+        AppError::Validation("resolver delegation only exists inside a server".to_string())
+    })?;
+    let market_id = parse_market_id(&market)?;
+    ctx.data()
+        .services
+        .markets
+        .add_market_resolver(
+            &guild_id.to_string(),
+            market_id,
+            &ctx.author().id.to_string(),
+            &user.id.to_string(),
+        )
+        .await?;
+    ui::send_embed(
+        ctx,
+        "🪪 Market Mod Added",
+        format!(
+            "<@{}> can now resolve or edit resolution for market **#{}**.\nOnly the market creator can add or remove this privilege.",
+            user.id, market_id
+        ),
+        serenity::Colour::from_rgb(46, 204, 113),
+    )
+    .await?;
+    Ok(())
+}
+
+#[poise::command(slash_command)]
+pub async fn remove_mod(
+    ctx: Context<'_>,
+    #[description = "Pick a native market"]
+    #[autocomplete = "autocomplete_native_market"]
+    market: String,
+    #[description = "User to remove resolve power from"] user: serenity::User,
+) -> Result<(), AppError> {
+    let guild_id = ctx.guild_id().ok_or_else(|| {
+        AppError::Validation("resolver delegation only exists inside a server".to_string())
+    })?;
+    let market_id = parse_market_id(&market)?;
+    let removed = ctx
+        .data()
+        .services
+        .markets
+        .remove_market_resolver(
+            &guild_id.to_string(),
+            market_id,
+            &ctx.author().id.to_string(),
+            &user.id.to_string(),
+        )
+        .await?;
+    let message = if removed {
+        format!(
+            "<@{}> no longer has resolve power for market **#{}**.",
+            user.id, market_id
+        )
+    } else {
+        format!(
+            "<@{}> did not currently have delegated resolve power for market **#{}**.",
+            user.id, market_id
+        )
+    };
+    ui::send_embed(
+        ctx,
+        "🧹 Market Mod Removed",
+        message,
+        serenity::Colour::from_rgb(231, 76, 60),
     )
     .await?;
     Ok(())
@@ -410,6 +597,22 @@ pub(crate) async fn autocomplete_open_market(
         .services
         .markets
         .autocomplete_markets(&guild_id.to_string(), partial, Some("open"), None, 20)
+        .await
+        .unwrap_or_default()
+}
+
+pub(crate) async fn autocomplete_native_market(
+    ctx: Context<'_>,
+    partial: &str,
+) -> Vec<serenity::AutocompleteChoice> {
+    let Some(guild_id) = ctx.guild_id() else {
+        return Vec::new();
+    };
+
+    ctx.data()
+        .services
+        .markets
+        .autocomplete_markets(&guild_id.to_string(), partial, None, Some("native"), 20)
         .await
         .unwrap_or_default()
 }

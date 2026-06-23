@@ -50,6 +50,11 @@ Notes:
 - `/market`
 - `/market_holders`
 - `/resolve_market`
+- `/resolve_market_na`
+- `/edit_resolution`
+- `/edit_resolution_na`
+- `/add_mod`
+- `/remove_mod`
 
 ### Trading
 
@@ -102,6 +107,10 @@ Notes:
 - Profit Rat controls pricing
 - Profit Rat controls resolution
 - Buying and selling move price through LMSR
+- Only the market creator can resolve by default
+- The market creator can delegate resolve/edit power with `/add_mod`
+- Native markets can be resolved as `N/A`, which refunds refundable exposure
+- A finished native market can have its resolution edited later, with balances recalculated from the audit trail
 
 ### Tracked Manifold Markets
 

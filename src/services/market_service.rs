@@ -110,6 +110,11 @@ pub struct MarketTimeSeries {
     pub series: Vec<OptionTimeSeries>,
 }
 
+enum NativeResolutionChoice<'a> {
+    Winner(&'a str),
+    RefundNa,
+}
+
 impl MarketService {
     pub fn new(config: Arc<AppConfig>, pool: DbPool, manifold: Arc<ManifoldClient>) -> Self {
         Self {
@@ -511,66 +516,131 @@ impl MarketService {
         &self,
         guild_id: &str,
         market_id: i64,
+        actor_user_id: &str,
         winning_label: &str,
     ) -> AppResult<i64> {
+        self.apply_native_resolution(
+            guild_id,
+            market_id,
+            actor_user_id,
+            NativeResolutionChoice::Winner(winning_label),
+            false,
+        )
+        .await
+    }
+
+    #[instrument(skip(self), fields(guild_id, market_id))]
+    pub async fn resolve_native_market_na(
+        &self,
+        guild_id: &str,
+        market_id: i64,
+        actor_user_id: &str,
+    ) -> AppResult<i64> {
+        self.apply_native_resolution(
+            guild_id,
+            market_id,
+            actor_user_id,
+            NativeResolutionChoice::RefundNa,
+            false,
+        )
+        .await
+    }
+
+    #[instrument(skip(self), fields(guild_id, market_id))]
+    pub async fn edit_native_resolution(
+        &self,
+        guild_id: &str,
+        market_id: i64,
+        actor_user_id: &str,
+        winning_label: &str,
+    ) -> AppResult<i64> {
+        self.apply_native_resolution(
+            guild_id,
+            market_id,
+            actor_user_id,
+            NativeResolutionChoice::Winner(winning_label),
+            true,
+        )
+        .await
+    }
+
+    #[instrument(skip(self), fields(guild_id, market_id))]
+    pub async fn edit_native_resolution_na(
+        &self,
+        guild_id: &str,
+        market_id: i64,
+        actor_user_id: &str,
+    ) -> AppResult<i64> {
+        self.apply_native_resolution(
+            guild_id,
+            market_id,
+            actor_user_id,
+            NativeResolutionChoice::RefundNa,
+            true,
+        )
+        .await
+    }
+
+    #[instrument(skip(self), fields(guild_id, market_id))]
+    pub async fn add_market_resolver(
+        &self,
+        guild_id: &str,
+        market_id: i64,
+        actor_user_id: &str,
+        resolver_user_id: &str,
+    ) -> AppResult<()> {
         let detail = self.market_detail(market_id).await?;
         self.ensure_market_belongs_to_guild(guild_id, &detail.market)?;
+        self.ensure_market_creator(actor_user_id, &detail.market)?;
         if detail.market.market_type() != MarketType::Native {
             return Err(AppError::Validation(
-                "use `/msync` for manifold-tracked markets".to_string(),
+                "resolver delegation is only used for native markets".to_string(),
             ));
         }
-        if matches!(
-            detail.market.status(),
-            MarketStatus::Resolved | MarketStatus::Settled
-        ) {
-            return Err(AppError::Conflict("market is already resolved".to_string()));
+        if resolver_user_id == detail.market.creator_discord_user_id {
+            return Err(AppError::Validation(
+                "the market creator already has resolve power".to_string(),
+            ));
         }
-
-        let winner = detail
-            .options
-            .iter()
-            .find(|option| option.label.eq_ignore_ascii_case(winning_label))
-            .ok_or_else(|| AppError::NotFound(format!("option `{winning_label}` was not found")))?;
-        let now = now_rfc3339();
-        let mut tx = self.pool.begin().await?;
         sqlx::query(
-            "UPDATE markets
-             SET status = 'resolved', resolved_option_id = ?2, resolved_at = ?3, updated_at = ?3
-             WHERE id = ?1",
+            "INSERT OR IGNORE INTO market_resolvers
+             (market_id, discord_user_id, granted_by_discord_user_id, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
         )
         .bind(market_id)
-        .bind(winner.id)
-        .bind(&now)
-        .execute(&mut *tx)
+        .bind(resolver_user_id)
+        .bind(actor_user_id)
+        .bind(now_rfc3339())
+        .execute(&self.pool)
         .await?;
+        Ok(())
+    }
 
-        let positions = sqlx::query_as::<_, PositionRecord>(
-            "SELECT id, market_id, option_id, discord_user_id, shares, total_spent_mana, total_received_mana, updated_at
-             FROM positions WHERE market_id = ?1",
+    #[instrument(skip(self), fields(guild_id, market_id))]
+    pub async fn remove_market_resolver(
+        &self,
+        guild_id: &str,
+        market_id: i64,
+        actor_user_id: &str,
+        resolver_user_id: &str,
+    ) -> AppResult<bool> {
+        let detail = self.market_detail(market_id).await?;
+        self.ensure_market_belongs_to_guild(guild_id, &detail.market)?;
+        self.ensure_market_creator(actor_user_id, &detail.market)?;
+        if resolver_user_id == detail.market.creator_discord_user_id {
+            return Err(AppError::Validation(
+                "the market creator's own resolve power cannot be removed".to_string(),
+            ));
+        }
+        let result = sqlx::query(
+            "DELETE FROM market_resolvers
+             WHERE market_id = ?1 AND discord_user_id = ?2",
         )
         .bind(market_id)
-        .fetch_all(&mut *tx)
+        .bind(resolver_user_id)
+        .execute(&self.pool)
         .await?;
-
-        let total_payout = self
-            .settle_positions(
-                &mut tx,
-                &detail.market.guild_id,
-                market_id,
-                winner.id,
-                positions,
-                "resolution_payout",
-            )
-            .await?;
-
-        sqlx::query("UPDATE markets SET status = 'settled', updated_at = ?2 WHERE id = ?1")
-            .bind(market_id)
-            .bind(&now)
-            .execute(&mut *tx)
-            .await?;
-        tx.commit().await?;
-        Ok(total_payout)
+        Ok(result.rows_affected() > 0)
     }
 
     pub async fn positions_for_user(
@@ -836,6 +906,162 @@ impl MarketService {
         })
     }
 
+    async fn apply_native_resolution(
+        &self,
+        guild_id: &str,
+        market_id: i64,
+        actor_user_id: &str,
+        choice: NativeResolutionChoice<'_>,
+        allow_edit: bool,
+    ) -> AppResult<i64> {
+        let detail = self.market_detail(market_id).await?;
+        self.ensure_market_belongs_to_guild(guild_id, &detail.market)?;
+        self.ensure_can_resolve_market(actor_user_id, &detail.market).await?;
+        if detail.market.market_type() != MarketType::Native {
+            return Err(AppError::Validation(
+                "use `/msync` for manifold-tracked markets".to_string(),
+            ));
+        }
+
+        let current_status = detail.market.status();
+        let already_final = matches!(
+            current_status,
+            MarketStatus::Resolved | MarketStatus::Settled | MarketStatus::Cancelled
+        );
+        if already_final && !allow_edit {
+            return Err(AppError::Conflict(
+                "market is already resolved; use `/edit_resolution` or `/edit_resolution_na` to change it"
+                    .to_string(),
+            ));
+        }
+        if !already_final && allow_edit {
+            return Err(AppError::Conflict(
+                "market is not resolved yet; use `/resolve_market` or `/resolve_market_na` first"
+                    .to_string(),
+            ));
+        }
+
+        let row = sqlx::query(
+            "SELECT COALESCE(resolution_revision, 0) AS resolution_revision, resolved_option_id
+             FROM markets WHERE id = ?1",
+        )
+        .bind(market_id)
+        .fetch_one(&self.pool)
+        .await?;
+        let current_revision = row.get::<i64, _>("resolution_revision");
+        let previous_option_id = row.get::<Option<i64>, _>("resolved_option_id");
+        let new_revision = current_revision + 1;
+        let positions = sqlx::query_as::<_, PositionRecord>(
+            "SELECT id, market_id, option_id, discord_user_id, shares, total_spent_mana, total_received_mana, updated_at
+             FROM positions WHERE market_id = ?1",
+        )
+        .bind(market_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut tx = self.pool.begin().await?;
+        if current_revision > 0 {
+            self.reverse_native_resolution_effects(
+                &mut tx,
+                guild_id,
+                market_id,
+                current_revision,
+                new_revision,
+            )
+            .await?;
+        }
+
+        let now = now_rfc3339();
+        let (new_status, new_option_id, total_amount, action_type, note) = match choice {
+            NativeResolutionChoice::Winner(winning_label) => {
+                let winner = detail
+                    .options
+                    .iter()
+                    .find(|option| option.label.eq_ignore_ascii_case(winning_label))
+                    .ok_or_else(|| {
+                        AppError::NotFound(format!("option `{winning_label}` was not found"))
+                    })?;
+                let total_payout = self
+                    .settle_positions(
+                        &mut tx,
+                        &detail.market.guild_id,
+                        market_id,
+                        winner.id,
+                        positions,
+                        "resolution_payout",
+                        new_revision,
+                    )
+                    .await?;
+                (
+                    MarketStatus::Settled,
+                    Some(winner.id),
+                    total_payout,
+                    if allow_edit {
+                        "edit_winner"
+                    } else {
+                        "resolve_winner"
+                    },
+                    format!("winner={}", winner.label),
+                )
+            }
+            NativeResolutionChoice::RefundNa => {
+                let total_refund = self
+                    .refund_all_positions_na(
+                        &mut tx,
+                        &detail.market.guild_id,
+                        market_id,
+                        positions,
+                        new_revision,
+                    )
+                    .await?;
+                (
+                    MarketStatus::Cancelled,
+                    None,
+                    total_refund,
+                    if allow_edit { "edit_refund_na" } else { "resolve_refund_na" },
+                    "resolved as N/A with refunds".to_string(),
+                )
+            }
+        };
+
+        sqlx::query(
+            "UPDATE markets
+             SET status = ?2,
+                 resolved_option_id = ?3,
+                 resolved_at = ?4,
+                 updated_at = ?4,
+                 resolution_revision = ?5,
+                 resolved_by_discord_user_id = ?6
+             WHERE id = ?1",
+        )
+        .bind(market_id)
+        .bind(new_status.as_str())
+        .bind(new_option_id)
+        .bind(&now)
+        .bind(new_revision)
+        .bind(actor_user_id)
+        .execute(&mut *tx)
+        .await?;
+
+        self.record_resolution_audit(
+            &mut tx,
+            market_id,
+            guild_id,
+            actor_user_id,
+            action_type,
+            current_status.as_str(),
+            new_status.as_str(),
+            previous_option_id,
+            new_option_id,
+            new_revision,
+            &note,
+        )
+        .await?;
+
+        tx.commit().await?;
+        Ok(total_amount)
+    }
+
     #[instrument(skip(self), fields(guild_id, market_id))]
     pub async fn market_holders(
         &self,
@@ -1022,6 +1248,7 @@ impl MarketService {
                 winner_option_id,
                 positions,
                 "external_resolution_payout",
+                0,
             )
             .await?;
 
@@ -1049,6 +1276,7 @@ impl MarketService {
         winner_option_id: i64,
         positions: Vec<PositionRecord>,
         reason: &str,
+        resolution_revision: i64,
     ) -> AppResult<i64> {
         let mut total_payout = 0_i64;
         for position in positions {
@@ -1071,8 +1299,8 @@ impl MarketService {
 
             sqlx::query(
                 "INSERT INTO economy_events
-                 (guild_id, discord_user_id, related_market_id, related_option_id, asset_type, amount_mana, amount_shares, reason, note, created_at)
-                 VALUES (?1, ?2, ?3, ?4, 'money', ?5, NULL, ?6, 'market settlement payout', ?7)",
+                 (guild_id, discord_user_id, related_market_id, related_option_id, asset_type, amount_mana, amount_shares, reason, note, created_at, resolution_revision)
+                 VALUES (?1, ?2, ?3, ?4, 'money', ?5, NULL, ?6, 'market settlement payout', ?7, ?8)",
             )
             .bind(guild_id)
             .bind(&position.discord_user_id)
@@ -1081,10 +1309,119 @@ impl MarketService {
             .bind(payout)
             .bind(reason)
             .bind(now_rfc3339())
+            .bind(resolution_revision)
             .execute(&mut **tx)
             .await?;
         }
         Ok(total_payout)
+    }
+
+    async fn refund_all_positions_na(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        guild_id: &str,
+        market_id: i64,
+        positions: Vec<PositionRecord>,
+        resolution_revision: i64,
+    ) -> AppResult<i64> {
+        let mut refund_by_user = HashMap::<String, i64>::new();
+        for position in positions {
+            let refund = (position.total_spent_mana - position.total_received_mana).max(0);
+            if refund <= 0 {
+                continue;
+            }
+            *refund_by_user.entry(position.discord_user_id).or_insert(0) += refund;
+        }
+
+        let mut total_refund = 0_i64;
+        for (discord_user_id, refund) in refund_by_user {
+            total_refund += refund;
+            sqlx::query(
+                "UPDATE guild_accounts
+                 SET balance_mana = balance_mana + ?2, updated_at = ?3
+                 WHERE guild_id = ?1 AND discord_user_id = ?4",
+            )
+            .bind(guild_id)
+            .bind(refund)
+            .bind(now_rfc3339())
+            .bind(&discord_user_id)
+            .execute(&mut **tx)
+            .await?;
+
+            sqlx::query(
+                "INSERT INTO economy_events
+                 (guild_id, discord_user_id, related_market_id, related_option_id, asset_type, amount_mana, amount_shares, reason, note, created_at, resolution_revision)
+                 VALUES (?1, ?2, ?3, NULL, 'money', ?4, NULL, 'resolution_refund', 'market resolved as N/A refund', ?5, ?6)",
+            )
+            .bind(guild_id)
+            .bind(&discord_user_id)
+            .bind(market_id)
+            .bind(refund)
+            .bind(now_rfc3339())
+            .bind(resolution_revision)
+            .execute(&mut **tx)
+            .await?;
+        }
+
+        Ok(total_refund)
+    }
+
+    async fn reverse_native_resolution_effects(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        guild_id: &str,
+        market_id: i64,
+        current_revision: i64,
+        new_revision: i64,
+    ) -> AppResult<()> {
+        let rows = sqlx::query(
+            "SELECT discord_user_id, related_option_id, COALESCE(amount_mana, 0) AS amount_mana, reason
+             FROM economy_events
+             WHERE related_market_id = ?1
+               AND resolution_revision = ?2
+               AND reason IN ('resolution_payout', 'resolution_refund')",
+        )
+        .bind(market_id)
+        .bind(current_revision)
+        .fetch_all(&mut **tx)
+        .await?;
+
+        for row in rows {
+            let discord_user_id = row.get::<String, _>("discord_user_id");
+            let related_option_id = row.get::<Option<i64>, _>("related_option_id");
+            let amount_mana = row.get::<i64, _>("amount_mana");
+            if amount_mana != 0 {
+                sqlx::query(
+                    "UPDATE guild_accounts
+                     SET balance_mana = balance_mana - ?2, updated_at = ?3
+                     WHERE guild_id = ?1 AND discord_user_id = ?4",
+                )
+                .bind(guild_id)
+                .bind(amount_mana)
+                .bind(now_rfc3339())
+                .bind(&discord_user_id)
+                .execute(&mut **tx)
+                .await?;
+            }
+
+            sqlx::query(
+                "INSERT INTO economy_events
+                 (guild_id, discord_user_id, related_market_id, related_option_id, asset_type, amount_mana, amount_shares, reason, note, created_at, resolution_revision)
+                 VALUES (?1, ?2, ?3, ?4, 'money', ?5, NULL, 'resolution_reversal', ?6, ?7, ?8)",
+            )
+            .bind(guild_id)
+            .bind(&discord_user_id)
+            .bind(market_id)
+            .bind(related_option_id)
+            .bind(-amount_mana)
+            .bind(format!("reversed revision {current_revision}"))
+            .bind(now_rfc3339())
+            .bind(new_revision)
+            .execute(&mut **tx)
+            .await?;
+        }
+
+        Ok(())
     }
 
     async fn total_external_payout(&self, market_id: i64) -> AppResult<i64> {
@@ -1144,6 +1481,80 @@ impl MarketService {
                 market.id
             )));
         }
+        Ok(())
+    }
+
+    fn ensure_market_creator(&self, actor_user_id: &str, market: &MarketRecord) -> AppResult<()> {
+        if market.creator_discord_user_id != actor_user_id {
+            return Err(AppError::Validation(
+                "only the market creator can manage resolver permissions".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn ensure_can_resolve_market(
+        &self,
+        actor_user_id: &str,
+        market: &MarketRecord,
+    ) -> AppResult<()> {
+        if market.creator_discord_user_id == actor_user_id {
+            return Ok(());
+        }
+
+        let row = sqlx::query(
+            "SELECT 1
+             FROM market_resolvers
+             WHERE market_id = ?1 AND discord_user_id = ?2
+             LIMIT 1",
+        )
+        .bind(market.id)
+        .bind(actor_user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        if row.is_some() {
+            Ok(())
+        } else {
+            Err(AppError::Validation(
+                "only the market creator or a delegated market mod can resolve this market"
+                    .to_string(),
+            ))
+        }
+    }
+
+    async fn record_resolution_audit(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        market_id: i64,
+        guild_id: &str,
+        actor_user_id: &str,
+        action_type: &str,
+        from_status: &str,
+        to_status: &str,
+        previous_option_id: Option<i64>,
+        new_option_id: Option<i64>,
+        revision: i64,
+        note: &str,
+    ) -> AppResult<()> {
+        sqlx::query(
+            "INSERT INTO market_resolution_audits
+             (market_id, guild_id, actor_discord_user_id, action_type, from_status, to_status, previous_option_id, new_option_id, revision, note, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        )
+        .bind(market_id)
+        .bind(guild_id)
+        .bind(actor_user_id)
+        .bind(action_type)
+        .bind(from_status)
+        .bind(to_status)
+        .bind(previous_option_id)
+        .bind(new_option_id)
+        .bind(revision)
+        .bind(note)
+        .bind(now_rfc3339())
+        .execute(&mut **tx)
+        .await?;
         Ok(())
     }
 }
