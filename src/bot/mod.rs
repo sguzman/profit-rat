@@ -1,3 +1,4 @@
+pub mod charts;
 pub mod commands;
 pub mod ui;
 

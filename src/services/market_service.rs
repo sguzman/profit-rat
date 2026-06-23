@@ -12,6 +12,7 @@ use crate::domain::external_market::{ExternalMarketSnapshot, ExternalResolution}
 use crate::domain::market::{
     MarketDetail, MarketOptionRecord, MarketRecord, MarketStatus, MarketType, PositionRecord,
 };
+use crate::domain::pricing::lmsr_probabilities;
 use crate::error::{AppError, AppResult};
 use crate::integrations::manifold::ManifoldClient;
 
@@ -87,6 +88,26 @@ pub struct MarketHolderLine {
     pub total_received_mana: i64,
     pub current_value_mana: i64,
     pub unrealized_pnl_mana: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct TimeSeriesPoint {
+    pub at: DateTime<Utc>,
+    pub probability: f64,
+}
+
+#[derive(Clone, Debug)]
+pub struct OptionTimeSeries {
+    pub label: String,
+    pub points: Vec<TimeSeriesPoint>,
+}
+
+#[derive(Clone, Debug)]
+pub struct MarketTimeSeries {
+    pub market_id: i64,
+    pub question: String,
+    pub market_type: String,
+    pub series: Vec<OptionTimeSeries>,
 }
 
 impl MarketService {
@@ -718,6 +739,104 @@ impl MarketService {
     }
 
     #[instrument(skip(self), fields(guild_id, market_id))]
+    pub async fn market_time_series_for_guild(
+        &self,
+        guild_id: &str,
+        market_id: i64,
+    ) -> AppResult<MarketTimeSeries> {
+        let view = self.market_view_for_guild(guild_id, market_id).await?;
+        let market = &view.detail.market;
+        let mut series = view
+            .detail
+            .options
+            .iter()
+            .map(|option| OptionTimeSeries {
+                label: option.label.clone(),
+                points: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+
+        match market.market_type() {
+            MarketType::Native => {
+                let created_at = parse_rfc3339_utc(&market.created_at)?;
+                let baseline = vec![1.0 / view.detail.options.len() as f64; view.detail.options.len()];
+                push_series_snapshot(&mut series, created_at, &baseline);
+
+                let trades = sqlx::query(
+                    "SELECT option_id, shares_delta, created_at
+                     FROM trades
+                     WHERE market_id = ?1
+                     ORDER BY created_at ASC, id ASC",
+                )
+                .bind(market_id)
+                .fetch_all(&self.pool)
+                .await?;
+
+                let option_index_by_id = view
+                    .detail
+                    .options
+                    .iter()
+                    .enumerate()
+                    .map(|(index, option)| (option.id, index))
+                    .collect::<HashMap<_, _>>();
+                let mut outstanding = vec![0.0; view.detail.options.len()];
+
+                for row in trades {
+                    let option_id = row.get::<i64, _>("option_id");
+                    let shares_delta = row.get::<f64, _>("shares_delta");
+                    let trade_at = parse_rfc3339_utc(&row.get::<String, _>("created_at"))?;
+                    let option_index = option_index_by_id
+                        .get(&option_id)
+                        .copied()
+                        .ok_or_else(|| AppError::NotFound("trade option is missing".to_string()))?;
+                    outstanding[option_index] += shares_delta;
+                    let probabilities = lmsr_probabilities(&outstanding, market.liquidity_b)?;
+                    push_series_snapshot(&mut series, trade_at, &probabilities);
+                }
+
+                let now = Utc::now();
+                push_series_snapshot(&mut series, now, &view.probabilities);
+            }
+            MarketType::Manifold => {
+                let snapshots = sqlx::query(
+                    "SELECT raw_json, fetched_at
+                     FROM external_market_snapshots
+                     WHERE market_id = ?1
+                     ORDER BY fetched_at ASC, id ASC",
+                )
+                .bind(market_id)
+                .fetch_all(&self.pool)
+                .await?;
+
+                if snapshots.is_empty() {
+                    push_series_snapshot(&mut series, Utc::now(), &view.probabilities);
+                } else {
+                    for row in snapshots {
+                        let fetched_at = parse_rfc3339_utc(&row.get::<String, _>("fetched_at"))?;
+                        let raw_json = serde_json::from_str::<serde_json::Value>(
+                            &row.get::<String, _>("raw_json"),
+                        )?;
+                        let probabilities = probabilities_from_snapshot_json(
+                            &view.detail.options,
+                            &view.probabilities,
+                            &raw_json,
+                        );
+                        push_series_snapshot(&mut series, fetched_at, &probabilities);
+                    }
+                    push_series_snapshot(&mut series, Utc::now(), &view.probabilities);
+                }
+            }
+        }
+
+        Ok(MarketTimeSeries {
+            market_id,
+            question: market.question.clone(),
+            market_type: market.market_type.clone(),
+            series,
+        })
+    }
+
+    #[instrument(skip(self), fields(guild_id, market_id))]
     pub async fn market_holders(
         &self,
         guild_id: &str,
@@ -1026,6 +1145,85 @@ impl MarketService {
             )));
         }
         Ok(())
+    }
+}
+
+fn push_series_snapshot(
+    series: &mut [OptionTimeSeries],
+    at: DateTime<Utc>,
+    probabilities: &[f64],
+) {
+    for (entry, probability) in series.iter_mut().zip(probabilities.iter().copied()) {
+        entry.points.push(TimeSeriesPoint { at, probability });
+    }
+}
+
+fn parse_rfc3339_utc(value: &str) -> AppResult<DateTime<Utc>> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|parsed| parsed.with_timezone(&Utc))
+        .map_err(|error| AppError::Other(anyhow::anyhow!("failed to parse timestamp `{value}`: {error}")))
+}
+
+fn probabilities_from_snapshot_json(
+    options: &[MarketOptionRecord],
+    fallback: &[f64],
+    raw_json: &serde_json::Value,
+) -> Vec<f64> {
+    if let Some(probability) = raw_json.get("probability").and_then(serde_json::Value::as_f64) {
+        return options
+            .iter()
+            .enumerate()
+            .map(|(index, option)| {
+                let upper = option.label.to_ascii_uppercase();
+                if upper == "YES" {
+                    probability
+                } else if upper == "NO" {
+                    1.0 - probability
+                } else {
+                    fallback.get(index).copied().unwrap_or(0.0)
+                }
+            })
+            .collect();
+    }
+
+    let Some(answers) = raw_json.get("answers").and_then(serde_json::Value::as_array) else {
+        return fallback.to_vec();
+    };
+
+    let mut probabilities = options
+        .iter()
+        .enumerate()
+        .map(|(index, option)| {
+            let matched = answers.iter().find(|answer| {
+                let id_matches = option
+                    .external_option_id
+                    .as_ref()
+                    .zip(answer.get("id").and_then(serde_json::Value::as_str))
+                    .map(|(left, right)| left == right)
+                    .unwrap_or(false);
+                let label_matches = answer
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|text| text.eq_ignore_ascii_case(&option.label))
+                    .unwrap_or(false);
+                id_matches || label_matches
+            });
+
+            matched
+                .and_then(|answer| answer.get("probability"))
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or_else(|| fallback.get(index).copied().unwrap_or(0.0))
+        })
+        .collect::<Vec<_>>();
+
+    let sum = probabilities.iter().sum::<f64>();
+    if sum.is_finite() && sum > 0.0 {
+        for value in &mut probabilities {
+            *value /= sum;
+        }
+        probabilities
+    } else {
+        fallback.to_vec()
     }
 }
 

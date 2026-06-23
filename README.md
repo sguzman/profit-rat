@@ -13,6 +13,7 @@ Profit Rat lets each Discord server run its own isolated paper economy with nati
 - Supports direct money donations and share donations
 - Supports peer-to-peer share offers
 - Supports money loans and share loans with acceptance, repayment, expiry, and default tracking
+- Can generate chart images directly in Discord for prices, holder concentration, exposure, and price history
 - Stores runtime state in SQLite under `.cache/`
 - Writes structured logs under `.cache/logs/`
 
@@ -56,6 +57,13 @@ Notes:
 - `/sell`
 - `/positions`
 - `/mpositions`
+
+### Charts
+
+- `/histogram_prices`
+- `/histogram_holders`
+- `/histogram_position`
+- `/histogram_time`
 
 ### Share Offers
 

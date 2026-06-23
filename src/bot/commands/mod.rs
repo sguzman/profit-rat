@@ -1,3 +1,4 @@
+mod charts;
 mod help;
 mod leaderboard;
 mod market;
@@ -9,6 +10,10 @@ use crate::error::AppError;
 
 pub fn all() -> Vec<poise::Command<crate::bot::Data, AppError>> {
     vec![
+        charts::histogram_prices(),
+        charts::histogram_holders(),
+        charts::histogram_position(),
+        charts::histogram_time(),
         help::help(),
         help::tutorial(),
         help::list_commands(),
