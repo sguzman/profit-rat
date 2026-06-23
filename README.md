@@ -65,6 +65,8 @@ Notes:
 - `/histogram_position`
 - `/histogram_time`
 
+`/histogram_position` supports an optional `user:@someone` argument so you can chart another member's exposure in the current server.
+
 ### Share Offers
 
 - `/offer_shares`

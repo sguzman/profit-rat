@@ -4,9 +4,7 @@ use poise::serenity_prelude as serenity;
 use tracing::info;
 
 use crate::bot::charts;
-use crate::bot::commands::market::{
-    autocomplete_any_market, parse_market_id,
-};
+use crate::bot::commands::market::{autocomplete_any_market, parse_market_id};
 use crate::bot::{display_name, Context};
 use crate::error::{AppError, AppResult};
 
@@ -26,7 +24,11 @@ pub async fn histogram_prices(
         .market_view_for_guild(&guild_id.to_string(), market_id)
         .await?;
     let artifact = charts::render_option_price_histogram(ctx.data().config.as_ref(), &view)?;
-    info!(market_id, filename = %artifact.filename, "rendered price histogram");
+    info!(
+        market_id,
+        filename = %artifact.filename,
+        "rendered price histogram"
+    );
     send_chart(
         ctx,
         artifact,
@@ -83,8 +85,12 @@ pub async fn histogram_holders(
                 HolderMetric::Value => holder.current_value_mana as f64,
             };
             let detail = match metric {
-                HolderMetric::Shares => format!("{} on {}", holder.option_label, holder.display_name),
-                HolderMetric::Value => format!("{} value · {}", holder.option_label, holder.display_name),
+                HolderMetric::Shares => {
+                    format!("{} on {}", holder.option_label, holder.display_name)
+                }
+                HolderMetric::Value => {
+                    format!("{} value · {}", holder.option_label, holder.display_name)
+                }
             };
             (holder.display_name.clone(), value, detail)
         })
@@ -97,7 +103,12 @@ pub async fn histogram_holders(
         metric.label(),
         &bars,
     )?;
-    info!(market_id, metric = %metric.label(), filename = %artifact.filename, "rendered holder histogram");
+    info!(
+        market_id,
+        metric = %metric.label(),
+        filename = %artifact.filename,
+        "rendered holder histogram"
+    );
     send_chart(
         ctx,
         artifact,
@@ -117,31 +128,31 @@ pub async fn histogram_position(
     #[description = "Pick a market"]
     #[autocomplete = "autocomplete_any_market"]
     market: String,
+    #[description = "Optional user to inspect"] user: Option<serenity::User>,
 ) -> Result<(), AppError> {
     let guild_id = require_guild(ctx)?;
     let market_id = parse_market_id(&market)?;
+    let target_user = user.as_ref().unwrap_or(ctx.author());
+    let target_user_id = target_user.id.to_string();
+    let target_display_name = display_name(target_user);
     let positions = ctx
         .data()
         .services
         .markets
-        .position_summaries_for_user(
-            &guild_id.to_string(),
-            &ctx.author().id.to_string(),
-            Some(market_id),
-        )
+        .position_summaries_for_user(&guild_id.to_string(), &target_user_id, Some(market_id))
         .await?;
     if positions.is_empty() {
-        return Err(AppError::Validation(
-            "you do not hold any shares in that market yet".to_string(),
-        ));
+        return Err(AppError::Validation(if user.is_some() {
+            "that user does not hold any shares in that market yet".to_string()
+        } else {
+            "you do not hold any shares in that market yet".to_string()
+        }));
     }
 
     let question = positions[0].market_question.clone();
     let mut by_option = HashMap::<String, (f64, i64, i64)>::new();
     for position in positions {
-        let entry = by_option
-            .entry(position.option_label)
-            .or_insert((0.0, 0, 0));
+        let entry = by_option.entry(position.option_label).or_insert((0.0, 0, 0));
         entry.0 += position.shares;
         entry.1 += position.current_value_mana;
         entry.2 += position.payout_if_correct_mana;
@@ -150,30 +161,26 @@ pub async fn histogram_position(
     let mut bars = by_option
         .into_iter()
         .map(|(label, (shares, value, payout))| {
-            (
-                label,
-                shares,
-                format!("Value {value} · Payout {payout}"),
-            )
+            (label, shares, format!("Value {value} · Payout {payout}"))
         })
         .collect::<Vec<_>>();
     bars.sort_by(|left, right| right.1.total_cmp(&left.1));
 
-    let artifact = charts::render_position_histogram(
-        ctx.data().config.as_ref(),
+    let artifact =
+        charts::render_position_histogram(ctx.data().config.as_ref(), market_id, &question, &bars)?;
+    info!(
         market_id,
-        &question,
-        &bars,
-    )?;
-    info!(market_id, user_id = %ctx.author().id, filename = %artifact.filename, "rendered position histogram");
+        user_id = %target_user_id,
+        filename = %artifact.filename,
+        "rendered position histogram"
+    );
     send_chart(
         ctx,
         artifact,
         format!("🧺 Position Histogram · #{}", market_id),
         format!(
             "{}\nShows {}'s current exposure by option.",
-            question,
-            display_name(ctx.author())
+            question, target_display_name
         ),
     )
     .await
@@ -195,7 +202,11 @@ pub async fn histogram_time(
         .market_time_series_for_guild(&guild_id.to_string(), market_id)
         .await?;
     let artifact = charts::render_time_series_chart(ctx.data().config.as_ref(), &history)?;
-    info!(market_id, filename = %artifact.filename, "rendered time histogram");
+    info!(
+        market_id,
+        filename = %artifact.filename,
+        "rendered time histogram"
+    );
     send_chart(
         ctx,
         artifact,
