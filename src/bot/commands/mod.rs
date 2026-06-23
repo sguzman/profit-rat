@@ -20,6 +20,7 @@ pub fn all() -> Vec<poise::Command<crate::bot::Data, AppError>> {
         user::ping(),
         user::balance(),
         user::claim(),
+        user::claim_info(),
         market::create_market(),
         market::markets(),
         market::list_markets(),
