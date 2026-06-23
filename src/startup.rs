@@ -193,6 +193,10 @@ async fn pick_announcement_channel(
     services: &Services,
     guild_id: serenity::GuildId,
 ) -> AppResult<Option<serenity::ChannelId>> {
+    if let Some(channel_id) = preferred_bots_channel(ctx, guild_id).await? {
+        return Ok(Some(channel_id));
+    }
+
     let partial_guild = guild_id.to_partial_guild(ctx).await?;
     if let Some(channel_id) = partial_guild.system_channel_id {
         return Ok(Some(channel_id));
@@ -203,6 +207,20 @@ async fn pick_announcement_channel(
         .latest_channel_for_guild(&guild_id.to_string())
         .await?;
     Ok(fallback.map(serenity::ChannelId::new))
+}
+
+async fn preferred_bots_channel(
+    ctx: &serenity::Context,
+    guild_id: serenity::GuildId,
+) -> AppResult<Option<serenity::ChannelId>> {
+    let channels = guild_id.channels(ctx).await?;
+    Ok(channels
+        .into_values()
+        .find(|channel| {
+            channel.kind == serenity::ChannelType::Text
+                && channel.name.eq_ignore_ascii_case("bots")
+        })
+        .map(|channel| channel.id))
 }
 
 #[instrument(skip(ctx, diff), fields(channel_id = %channel_id))]
