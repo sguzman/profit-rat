@@ -46,6 +46,7 @@ pub async fn sync_commands_and_announce(
     jobs::spawn_bot_behavior_jobs(
         Arc::new(config.clone()),
         services.clone(),
+        ctx.http.clone(),
         ready.user.id.to_string(),
         ready.user.global_name.clone().unwrap_or_else(|| ready.user.name.clone()),
         guild_ids.iter().map(ToString::to_string).collect(),
@@ -189,7 +190,7 @@ fn manifest_path(config: &AppConfig) -> PathBuf {
     config.cache_dir.join(COMMAND_MANIFEST_FILE)
 }
 
-async fn pick_announcement_channel(
+pub(crate) async fn pick_announcement_channel(
     ctx: &serenity::Context,
     services: &Services,
     config: &AppConfig,

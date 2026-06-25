@@ -111,6 +111,7 @@ pub struct RepaymentReceipt {
 pub struct AutoRepaySummary {
     pub repaid_loans: u64,
     pub total_paid_mana: i64,
+    pub loan_ids: Vec<i64>,
 }
 
 #[derive(Clone, Debug, FromRow)]
@@ -1133,6 +1134,7 @@ impl SocialService {
         let mut summary = AutoRepaySummary {
             repaid_loans: 0,
             total_paid_mana: 0,
+            loan_ids: Vec::new(),
         };
         for row in rows {
             let loan_id = row.get::<i64, _>("id");
@@ -1168,6 +1170,7 @@ impl SocialService {
                 .await?;
             summary.repaid_loans += 1;
             summary.total_paid_mana += receipt.paid_mana.unwrap_or(0);
+            summary.loan_ids.push(loan_id);
         }
 
         Ok(summary)
@@ -1196,6 +1199,7 @@ impl SocialService {
         let mut summary = AutoRepaySummary {
             repaid_loans: 0,
             total_paid_mana: 0,
+            loan_ids: Vec::new(),
         };
         for row in rows {
             let loan_id = row.get::<i64, _>("id");
@@ -1280,6 +1284,7 @@ impl SocialService {
 
             summary.repaid_loans += 1;
             summary.total_paid_mana += payment;
+            summary.loan_ids.push(loan_id);
         }
 
         Ok(summary)

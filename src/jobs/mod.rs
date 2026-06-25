@@ -102,6 +102,7 @@ pub fn spawn_background_jobs(
 pub fn spawn_bot_behavior_jobs(
     config: Arc<AppConfig>,
     services: Services,
+    http: Arc<serenity::Http>,
     bot_user_id: String,
     bot_display_name: String,
     guild_ids: Vec<String>,
@@ -109,6 +110,7 @@ pub fn spawn_bot_behavior_jobs(
     let behavior_every = Duration::from_secs(config.bot.worker_interval_seconds.max(15) as u64);
     let behavior_config = config.clone();
     let behavior_services = services.clone();
+    let behavior_http = http.clone();
     let behavior_bot_user_id = bot_user_id.clone();
     let behavior_bot_display_name = bot_display_name.clone();
     let behavior_guild_ids = guild_ids.clone();
@@ -171,36 +173,68 @@ pub fn spawn_bot_behavior_jobs(
                     }
                 }
 
-                match behavior_services
+                let due_repayment = behavior_services
                     .social
                     .auto_repay_due_money_loans(
                         guild_id,
                         &behavior_bot_user_id,
                         behavior_config.bot.worker_interval_seconds + 5,
                     )
-                    .await
-                {
-                    Ok(summary) if summary.repaid_loans > 0 => info!(
-                        guild_id,
-                        repaid_loans = summary.repaid_loans,
-                        total_paid_mana = summary.total_paid_mana,
-                        "bot auto-repaid money loans"
-                    ),
+                    .await;
+                match due_repayment {
+                    Ok(summary) if summary.repaid_loans > 0 => {
+                        info!(
+                            guild_id,
+                            repaid_loans = summary.repaid_loans,
+                            total_paid_mana = summary.total_paid_mana,
+                            "bot auto-repaid money loans"
+                        );
+                        if let Ok(parsed_guild_id) = guild_id.parse::<u64>() {
+                            if let Err(error) = announce_loan_repayment(
+                                &behavior_http,
+                                &behavior_services,
+                                behavior_config.as_ref(),
+                                serenity::GuildId::new(parsed_guild_id),
+                                "🤝 Rat Repaid Loans",
+                                &summary,
+                            )
+                            .await
+                            {
+                                error!(guild_id, %error, "failed to announce bot loan repayment");
+                            }
+                        }
+                    }
                     Ok(_) => {}
                     Err(error) => error!(guild_id, %error, "bot auto-loan repayment failed"),
                 }
 
-                match behavior_services
+                let defaulted_repayment = behavior_services
                     .social
                     .auto_repay_defaulted_money_loans(guild_id, &behavior_bot_user_id)
-                    .await
-                {
-                    Ok(summary) if summary.repaid_loans > 0 => info!(
-                        guild_id,
-                        repaid_loans = summary.repaid_loans,
-                        total_paid_mana = summary.total_paid_mana,
-                        "bot repaid defaulted money loans"
-                    ),
+                    .await;
+                match defaulted_repayment {
+                    Ok(summary) if summary.repaid_loans > 0 => {
+                        info!(
+                            guild_id,
+                            repaid_loans = summary.repaid_loans,
+                            total_paid_mana = summary.total_paid_mana,
+                            "bot repaid defaulted money loans"
+                        );
+                        if let Ok(parsed_guild_id) = guild_id.parse::<u64>() {
+                            if let Err(error) = announce_loan_repayment(
+                                &behavior_http,
+                                &behavior_services,
+                                behavior_config.as_ref(),
+                                serenity::GuildId::new(parsed_guild_id),
+                                "💸 Rat Cleared Defaulted Loans",
+                                &summary,
+                            )
+                            .await
+                            {
+                                error!(guild_id, %error, "failed to announce bot defaulted-loan repayment");
+                            }
+                        }
+                    }
                     Ok(_) => {}
                     Err(error) => error!(guild_id, %error, "bot defaulted-loan repayment failed"),
                 }
@@ -346,4 +380,91 @@ async fn poll_and_announce(
         }
     }
     Ok(())
+}
+
+#[instrument(skip(http, services, config, summary), fields(guild_id = %guild_id))]
+async fn announce_loan_repayment(
+    http: &Arc<serenity::Http>,
+    services: &Services,
+    config: &AppConfig,
+    guild_id: serenity::GuildId,
+    title: &str,
+    summary: &crate::services::social_service::AutoRepaySummary,
+) -> Result<(), crate::error::AppError> {
+    let Some(channel_id) = pick_announcement_channel(http, services, config, guild_id).await? else {
+        return Ok(());
+    };
+
+    let embed = serenity::CreateEmbed::new()
+        .title(title)
+        .description(format!(
+            "**Loans repaid:** `{}`\n**Loan IDs:** {}\n**Total paid:** {}",
+            summary.repaid_loans,
+            summary
+                .loan_ids
+                .iter()
+                .map(|id| format!("#{}", id))
+                .collect::<Vec<_>>()
+                .join(", "),
+            ui::money(config, summary.total_paid_mana)
+        ))
+        .color(serenity::Colour::from_rgb(46, 204, 113));
+
+    channel_id
+        .send_message(http, serenity::CreateMessage::new().embed(embed))
+        .await?;
+    Ok(())
+}
+
+async fn pick_announcement_channel(
+    http: &Arc<serenity::Http>,
+    services: &Services,
+    config: &AppConfig,
+    guild_id: serenity::GuildId,
+) -> Result<Option<serenity::ChannelId>, crate::error::AppError> {
+    if let Some(channel_id) = preferred_named_channel(
+        http,
+        guild_id,
+        &config.bot.startup_announcement_channel_name,
+    )
+    .await?
+    {
+        return Ok(Some(channel_id));
+    }
+
+    if let Some(channel_id) = preferred_named_channel(
+        http,
+        guild_id,
+        &config.bot.startup_announcement_fallback_channel_name,
+    )
+    .await?
+    {
+        return Ok(Some(channel_id));
+    }
+
+    let fallback = services
+        .markets
+        .latest_channel_for_guild(&guild_id.to_string())
+        .await?;
+    Ok(fallback.map(serenity::ChannelId::new))
+}
+
+async fn preferred_named_channel(
+    http: &Arc<serenity::Http>,
+    guild_id: serenity::GuildId,
+    channel_name: &str,
+) -> Result<Option<serenity::ChannelId>, crate::error::AppError> {
+    let channel_name = channel_name.trim();
+    if channel_name.is_empty() {
+        return Ok(None);
+    }
+
+    let channels = guild_id.channels(http).await?;
+    Ok(channels
+        .into_values()
+        .find(|channel| {
+            channel.kind == serenity::ChannelType::Text
+                && channel.name.eq_ignore_ascii_case(channel_name)
+        })
+        .map(|channel| channel.id))
 }
