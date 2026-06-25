@@ -1174,6 +1174,118 @@ impl SocialService {
     }
 
     #[instrument(skip(self), fields(guild_id, borrower_user_id))]
+    pub async fn auto_repay_defaulted_money_loans(
+        &self,
+        guild_id: &str,
+        borrower_user_id: &str,
+    ) -> AppResult<AutoRepaySummary> {
+        let rows = sqlx::query(
+            "SELECT id
+             FROM loans
+             WHERE guild_id = ?1
+               AND borrower_discord_user_id = ?2
+               AND asset_type = 'money'
+               AND status = 'defaulted'
+             ORDER BY due_at ASC, id ASC",
+        )
+        .bind(guild_id)
+        .bind(borrower_user_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut summary = AutoRepaySummary {
+            repaid_loans: 0,
+            total_paid_mana: 0,
+        };
+        for row in rows {
+            let loan_id = row.get::<i64, _>("id");
+            let loan = self.load_loan_any_status(guild_id, loan_id).await?;
+            if loan.asset_type != "money" || loan.status != "defaulted" {
+                continue;
+            }
+
+            let already_repaid = self.repaid_totals(loan.id).await?.0;
+            let remaining = (loan.repayment_mana.unwrap_or(0) - already_repaid).max(0);
+            if remaining <= 0 {
+                continue;
+            }
+
+            let available_balance = self.balance(guild_id, borrower_user_id).await?;
+            if available_balance <= 0 {
+                continue;
+            }
+
+            let payment = if self.config.loans.allow_partial_repayment {
+                available_balance.min(remaining)
+            } else if available_balance >= remaining {
+                remaining
+            } else {
+                0
+            };
+            if payment <= 0 {
+                continue;
+            }
+
+            let mut tx = self.pool.begin().await?;
+            self.adjust_balance(&mut tx, guild_id, borrower_user_id, -payment)
+                .await?;
+            self.adjust_balance(&mut tx, guild_id, &loan.lender_discord_user_id, payment)
+                .await?;
+            self.insert_money_event(
+                &mut tx,
+                guild_id,
+                borrower_user_id,
+                -payment,
+                "loan_repayment_sent_after_default",
+                None,
+                None,
+            )
+            .await?;
+            self.insert_money_event(
+                &mut tx,
+                guild_id,
+                &loan.lender_discord_user_id,
+                payment,
+                "loan_repayment_received_after_default",
+                None,
+                None,
+            )
+            .await?;
+            sqlx::query(
+                "INSERT INTO loan_repayments
+                 (loan_id, guild_id, payer_discord_user_id, amount_mana, amount_shares, created_at)
+                 VALUES (?1, ?2, ?3, ?4, NULL, ?5)",
+            )
+            .bind(loan.id)
+            .bind(guild_id)
+            .bind(borrower_user_id)
+            .bind(payment)
+            .bind(now_rfc3339())
+            .execute(&mut *tx)
+            .await?;
+
+            let new_repaid = already_repaid + payment;
+            if new_repaid >= loan.repayment_mana.unwrap_or(0) {
+                sqlx::query(
+                    "UPDATE loans
+                     SET status = 'repaid', closed_at = ?2
+                     WHERE id = ?1",
+                )
+                .bind(loan.id)
+                .bind(now_rfc3339())
+                .execute(&mut *tx)
+                .await?;
+            }
+            tx.commit().await?;
+
+            summary.repaid_loans += 1;
+            summary.total_paid_mana += payment;
+        }
+
+        Ok(summary)
+    }
+
+    #[instrument(skip(self), fields(guild_id, borrower_user_id))]
     pub async fn auto_accept_eligible_loans(
         &self,
         guild_id: &str,
@@ -1479,6 +1591,19 @@ impl SocialService {
         Ok(loan)
     }
 
+    async fn load_loan_any_status(&self, guild_id: &str, loan_id: i64) -> AppResult<LoanRecord> {
+        sqlx::query_as::<_, LoanRecord>(
+            "SELECT id, guild_id, asset_type, market_id, option_id, lender_discord_user_id, borrower_discord_user_id, principal_mana, principal_shares, repayment_mana, repayment_shares, interest_bps, due_at, status, expires_at
+             FROM loans
+             WHERE guild_id = ?1 AND id = ?2",
+        )
+        .bind(guild_id)
+        .bind(loan_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("loan {loan_id} was not found")))
+    }
+
     async fn repaid_totals_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -1591,6 +1716,7 @@ mod tests {
         LoanPolicyConfig, ManifoldConfig, NegativeStyle, PolicyConfig, TransferPolicyConfig,
     };
     use crate::db;
+    use crate::db::now_rfc3339;
 
     fn test_config(cache_dir: std::path::PathBuf) -> AppConfig {
         AppConfig {
@@ -1733,6 +1859,61 @@ mod tests {
             .auto_repay_due_money_loans("guild-a", "bot", 4_000)
             .await
             .expect("auto repay");
+
+        assert_eq!(summary.repaid_loans, 1);
+        assert!(summary.total_paid_mana >= 1_050);
+
+        let lender_view = service
+            .loan_status("guild-a", "lender")
+            .await
+            .expect("loan status");
+        assert_eq!(lender_view.len(), 1);
+        assert_eq!(lender_view[0].status, "repaid");
+        assert_eq!(lender_view[0].repaid_mana, 1_050);
+    }
+
+    #[tokio::test]
+    async fn auto_repay_defaulted_money_loans_restores_old_bot_debt() {
+        let temp = tempdir().expect("tempdir");
+        let cache_dir = temp.path().join(".cache");
+        let config = Arc::new(test_config(cache_dir.clone()));
+        config.ensure_runtime_dirs().expect("dirs");
+        let pool = db::connect(&config).await.expect("pool");
+        let service = super::SocialService::new(config.clone(), pool);
+
+        let offer = service
+            .offer_loan_money(
+                "guild-a",
+                "lender",
+                "Lender",
+                "bot",
+                "Profit Rat",
+                1_000,
+                Some(500),
+                Some(3_600),
+            )
+            .await
+            .expect("offer");
+        service
+            .accept_loan("guild-a", offer.loan_id, "bot", "Profit Rat")
+            .await
+            .expect("accept");
+
+        sqlx::query(
+            "UPDATE loans
+             SET status = 'defaulted', closed_at = ?2
+             WHERE id = ?1",
+        )
+        .bind(offer.loan_id)
+        .bind(now_rfc3339())
+        .execute(&service.pool)
+        .await
+        .expect("mark defaulted");
+
+        let summary = service
+            .auto_repay_defaulted_money_loans("guild-a", "bot")
+            .await
+            .expect("auto repay defaulted");
 
         assert_eq!(summary.repaid_loans, 1);
         assert!(summary.total_paid_mana >= 1_050);
