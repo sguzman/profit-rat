@@ -171,6 +171,25 @@ pub fn spawn_bot_behavior_jobs(
                     }
                 }
 
+                match behavior_services
+                    .social
+                    .auto_repay_due_money_loans(
+                        guild_id,
+                        &behavior_bot_user_id,
+                        behavior_config.bot.worker_interval_seconds + 5,
+                    )
+                    .await
+                {
+                    Ok(summary) if summary.repaid_loans > 0 => info!(
+                        guild_id,
+                        repaid_loans = summary.repaid_loans,
+                        total_paid_mana = summary.total_paid_mana,
+                        "bot auto-repaid money loans"
+                    ),
+                    Ok(_) => {}
+                    Err(error) => error!(guild_id, %error, "bot auto-loan repayment failed"),
+                }
+
                 if behavior_config.bot.auto_buy_bonds {
                     match behavior_services
                         .bonds

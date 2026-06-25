@@ -107,6 +107,12 @@ pub struct RepaymentReceipt {
     pub status: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct AutoRepaySummary {
+    pub repaid_loans: u64,
+    pub total_paid_mana: i64,
+}
+
 #[derive(Clone, Debug, FromRow)]
 struct LoanRecord {
     id: i64,
@@ -1100,6 +1106,73 @@ impl SocialService {
         Ok(result.rows_affected())
     }
 
+    #[instrument(skip(self), fields(guild_id, borrower_user_id, horizon_seconds))]
+    pub async fn auto_repay_due_money_loans(
+        &self,
+        guild_id: &str,
+        borrower_user_id: &str,
+        horizon_seconds: i64,
+    ) -> AppResult<AutoRepaySummary> {
+        let horizon = Utc::now() + Duration::seconds(horizon_seconds.max(0));
+        let rows = sqlx::query(
+            "SELECT id
+             FROM loans
+             WHERE guild_id = ?1
+               AND borrower_discord_user_id = ?2
+               AND asset_type = 'money'
+               AND status = 'active'
+               AND due_at <= ?3
+             ORDER BY due_at ASC, id ASC",
+        )
+        .bind(guild_id)
+        .bind(borrower_user_id)
+        .bind(horizon.to_rfc3339())
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut summary = AutoRepaySummary {
+            repaid_loans: 0,
+            total_paid_mana: 0,
+        };
+        for row in rows {
+            let loan_id = row.get::<i64, _>("id");
+            let loan = self.load_active_loan(guild_id, loan_id).await?;
+            if loan.asset_type != "money" {
+                continue;
+            }
+
+            let already_repaid = self.repaid_totals(loan.id).await?.0;
+            let remaining = (loan.repayment_mana.unwrap_or(0) - already_repaid).max(0);
+            if remaining <= 0 {
+                continue;
+            }
+
+            let available_balance = self.balance(guild_id, borrower_user_id).await?;
+            if available_balance <= 0 {
+                continue;
+            }
+
+            let payment = if self.config.loans.allow_partial_repayment {
+                available_balance.min(remaining)
+            } else if available_balance >= remaining {
+                remaining
+            } else {
+                0
+            };
+            if payment <= 0 {
+                continue;
+            }
+
+            let receipt = self
+                .repay_loan(guild_id, loan_id, borrower_user_id, Some(payment), None)
+                .await?;
+            summary.repaid_loans += 1;
+            summary.total_paid_mana += receipt.paid_mana.unwrap_or(0);
+        }
+
+        Ok(summary)
+    }
+
     #[instrument(skip(self), fields(guild_id, borrower_user_id))]
     pub async fn auto_accept_eligible_loans(
         &self,
@@ -1422,6 +1495,20 @@ impl SocialService {
         Ok((row.get("repaid_mana"), row.get("repaid_shares")))
     }
 
+    async fn repaid_totals(&self, loan_id: i64) -> AppResult<(i64, f64)> {
+        let row = sqlx::query(
+            "SELECT
+                COALESCE(SUM(amount_mana), 0) AS repaid_mana,
+                COALESCE(SUM(amount_shares), 0.0) AS repaid_shares
+             FROM loan_repayments
+             WHERE loan_id = ?1",
+        )
+        .bind(loan_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok((row.get("repaid_mana"), row.get("repaid_shares")))
+    }
+
     async fn display_name(&self, guild_id: &str, user_id: &str) -> AppResult<String> {
         let row = sqlx::query(
             "SELECT display_name
@@ -1491,4 +1578,171 @@ fn parse_rfc3339_utc(value: &str) -> AppResult<chrono::DateTime<Utc>> {
     chrono::DateTime::parse_from_rfc3339(value)
         .map(|value| value.with_timezone(&Utc))
         .map_err(|_| AppError::Other(anyhow::anyhow!("invalid RFC3339 timestamp: {value}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use tempfile::tempdir;
+
+    use crate::config::{
+        AppConfig, BondPolicyConfig, BotPolicyConfig, CurrencyConfig, CurrencyPosition,
+        LoanPolicyConfig, ManifoldConfig, NegativeStyle, PolicyConfig, TransferPolicyConfig,
+    };
+    use crate::db;
+
+    fn test_config(cache_dir: std::path::PathBuf) -> AppConfig {
+        AppConfig {
+            discord_token: "token".to_string(),
+            cache_dir: cache_dir.clone(),
+            log_dir: cache_dir.join("logs"),
+            database_path: cache_dir.join("discord-bot.sqlite"),
+            database_url: format!(
+                "sqlite://{}",
+                cache_dir
+                    .join("discord-bot.sqlite")
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            ),
+            starting_balance: 10_000,
+            claim_amount: 10_000,
+            claim_period_seconds: 43_200,
+            claim_period_name: "twice-daily login".to_string(),
+            default_liquidity_b: 100.0,
+            share_offer_expiration_seconds: 60,
+            share_offer_cleanup_interval_seconds: 15,
+            manifold_api_base_url: "https://api.manifold.markets/v0".to_string(),
+            manifold_snapshot_ttl_seconds: 60,
+            manifold_poll_interval_seconds: 120,
+            policies: PolicyConfig {
+                starting_balance: 10_000,
+                claim_amount: 10_000,
+                claim_period_seconds: 43_200,
+                claim_period_name: "twice-daily login".to_string(),
+                default_liquidity_b: 100.0,
+                share_offer_expiration_seconds: 60,
+                share_offer_cleanup_interval_seconds: 15,
+            },
+            transfers: TransferPolicyConfig {
+                allow_money_donations: true,
+                allow_share_donations: true,
+                allow_money_offers: true,
+                allow_share_offers: true,
+                min_money_transfer: 1,
+                min_share_transfer: 0.01,
+                max_open_offers_per_user: 10,
+            },
+            loans: LoanPolicyConfig {
+                allow_money_loans: true,
+                allow_share_loans: true,
+                allow_partial_repayment: true,
+                allow_early_repayment: true,
+                allow_interest: true,
+                default_interest_bps: 0,
+                max_interest_bps: 2_500,
+                default_duration_seconds: 86_400,
+                max_duration_seconds: 2_592_000,
+                max_open_loans_per_user: 10,
+            },
+            bot: BotPolicyConfig {
+                auto_claim: true,
+                auto_accept_loans: true,
+                startup_announcement_channel_name: "bots".to_string(),
+                startup_announcement_fallback_channel_name: "general".to_string(),
+                max_loan_interest_bps: 500,
+                min_loan_duration_seconds: 3_600,
+                auto_buy_bonds: true,
+                min_bond_yield_bps: 100,
+                max_bond_yield_bps: 500,
+                min_bond_maturity_seconds: 3_600,
+                max_bond_maturity_seconds: 86_400,
+                max_bond_price_mana: 5_000,
+                max_bond_purchase_quantity: 1,
+                max_total_bond_exposure_mana: 20_000,
+                worker_interval_seconds: 60,
+            },
+            bonds: BondPolicyConfig {
+                enabled: true,
+                default_yield_period_seconds: 3_600,
+                max_yield_bps: 5_000,
+                min_maturity_seconds: 3_600,
+                max_maturity_seconds: 7_776_000,
+                max_open_issuances_per_user: 10,
+                worker_interval_seconds: 60,
+            },
+            manifold: ManifoldConfig {
+                api_base_url: "https://api.manifold.markets/v0".to_string(),
+                snapshot_ttl_seconds: 60,
+                poll_interval_seconds: 120,
+            },
+            currency: CurrencyConfig {
+                code: "MANA".to_string(),
+                display_name: "Fake Mana".to_string(),
+                singular: "mana".to_string(),
+                plural: "mana".to_string(),
+                symbol: "$".to_string(),
+                textual_symbol: "mana".to_string(),
+                emoji: "money".to_string(),
+                custom_emoji: String::new(),
+                image_symbol_path: String::new(),
+                image_symbol_url: String::new(),
+                position: CurrencyPosition::Suffix,
+                space_between: true,
+                show_symbol: false,
+                show_textual_symbol: true,
+                show_code: false,
+                use_emoji_in_embeds: true,
+                use_emoji_in_plaintext: true,
+                decimals: 0,
+                thousands_separator: ",".to_string(),
+                negative_style: NegativeStyle::Minus,
+                short_suffixes: false,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn auto_repay_due_money_loans_reduces_bot_debt() {
+        let temp = tempdir().expect("tempdir");
+        let cache_dir = temp.path().join(".cache");
+        let config = Arc::new(test_config(cache_dir.clone()));
+        config.ensure_runtime_dirs().expect("dirs");
+        let pool = db::connect(&config).await.expect("pool");
+        let service = super::SocialService::new(config.clone(), pool);
+
+        let offer = service
+            .offer_loan_money(
+                "guild-a",
+                "lender",
+                "Lender",
+                "bot",
+                "Profit Rat",
+                1_000,
+                Some(500),
+                Some(3_600),
+            )
+            .await
+            .expect("offer");
+        service
+            .accept_loan("guild-a", offer.loan_id, "bot", "Profit Rat")
+            .await
+            .expect("accept");
+
+        let summary = service
+            .auto_repay_due_money_loans("guild-a", "bot", 4_000)
+            .await
+            .expect("auto repay");
+
+        assert_eq!(summary.repaid_loans, 1);
+        assert!(summary.total_paid_mana >= 1_050);
+
+        let lender_view = service
+            .loan_status("guild-a", "lender")
+            .await
+            .expect("loan status");
+        assert_eq!(lender_view.len(), 1);
+        assert_eq!(lender_view[0].status, "repaid");
+        assert_eq!(lender_view[0].repaid_mana, 1_050);
+    }
 }
